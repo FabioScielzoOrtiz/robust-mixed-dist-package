@@ -1,4 +1,4 @@
 polars
 numpy
 pandas
-scipy
+scipy<=1.16.2

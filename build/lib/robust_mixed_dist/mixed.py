@@ -166,7 +166,7 @@ def get_distances(xi, xr, p1, p2, p3, d1='euclidean', d2='sokal', d3='matching',
     
 ################################################################################
 
-def vg_ggower_estimation(X, p1, p2, p3, d1='euclidean', d2='sokal', d3='matching', 
+def compute_geometric_var(X, p1, p2, p3, d1='euclidean', d2='sokal', d3='matching', 
                          q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, 
                          n_iters=20, weights=None): 
     """
@@ -242,7 +242,7 @@ def vg_ggower_fast_estimation(X, p1, p2, p3, d1='euclidean', d2='sokal', d3='mat
         else:
             sample_weights = None
         
-        VG1, VG2, VG3 = vg_ggower_estimation(X=X_sample, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3, q=q,
+        VG1, VG2, VG3 = compute_geometric_var(X=X_sample, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3, q=q,
                                             robust_method=robust_method, epsilon=epsilon, alpha=alpha, 
                                             n_iters=n_iters, weights=sample_weights)
         
@@ -357,7 +357,7 @@ class GGowerDist:
 
     def fit(self, X) :
         """
-        Fit method that computes the geometric variability and covariance matrix to be used in 'compute' method, if needed.
+        Fit method that computes the geometric variability and covariance matrix (if needed) to be used in 'compute' method.
         
         Parameters:
             X: a pandas/polars data-frame or a numpy array. Represents a data matrix.

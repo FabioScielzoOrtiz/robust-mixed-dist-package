@@ -592,7 +592,7 @@ def S_robust(X, method, epsilon, n_iters, alpha=None, weights=None):
 
 ################################################################################
 
-def robust_maha_dist_matrix(X, S_robust):
+def robust_mahalanobis_dist_matrix(X, S_robust):
     """
     Calculates the Robust Mahalanobis distance matrix for a data matrix `X`
     using a robust estimation of the covariance matrix.
@@ -634,7 +634,7 @@ def robust_maha_dist_matrix(X, S_robust):
 
 ################################################################################
 
-def robust_maha_dist(xi, xr, S_robust) :
+def robust_mahalanobis_dist(xi, xr, S_robust) :
     """
     Calculates the Robust Mahalanobis distance between a pair of vectors.
 
@@ -658,7 +658,7 @@ def robust_maha_dist(xi, xr, S_robust) :
         xr = xr.to_numpy() 
 
     X = np.array([xi, xr])
-    dist_xi_xr = robust_maha_dist_matrix(X, S_robust)
+    dist_xi_xr = robust_mahalanobis_dist_matrix(X, S_robust)
     dist_xi_xr = dist_xi_xr[0,1]
     
     return dist_xi_xr
