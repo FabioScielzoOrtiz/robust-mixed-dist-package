@@ -1,4 +1,9 @@
+################################################################################
+
 import numpy as np
+import warnings
+from scipy.sparse.linalg import eigsh
+from scipy.linalg import eigh
 
 from robust_mixed_dist.quantitative import (
     euclidean_dist_matrix, 
@@ -265,6 +270,66 @@ def compute_geometric_var(
 
 ################################################################################
 
+class GGowerDistMatrix: 
+    """
+    Calculates the Generalized Gower matrix for a data matrix.
+    """
+
+    def __init__(self, p1, p2, p3, d1='euclidean', d2='sokal', d3='matching', q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None):
+        """
+        Constructor method.
+        
+        Parameters:
+            p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
+            d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
+            d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
+            d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
+            q: the parameter that defines the Minkowski distance. Must be a positive integer.
+            metrobust_methodhod: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
+            alpha : a real number in [0,1] that is used if `robust_method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
+            epsilon : parameter used by the Delvin transformation. epsilon=0.05 is recommended. Only needed when d1 = 'robust_mahalanobis'.
+            n_iter : maximum number of iterations run by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
+            weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
+            fast_VG: whether the geometric variability estimation will be full (False) or fast (True).
+            VG_sample_size: sample size to be used to make the estimation of the geometric variability.
+            VG_n_samples: number of samples to be used to make the estimation of the geometric variability.
+            random_state: the random seed used for the (random) sample elements.
+        """
+        self.p1 = p1 ; self.p2 = p2 ; self.p3 = p3
+        self.d1 = d1 ; self.d2 = d2 ; self.d3 = d3
+        self.q = q ; self.robust_method = robust_method ; self.alpha = alpha ; 
+        self.epsilon = epsilon ; self.n_iters = n_iters; self.weights = weights
+
+    def compute(self, X):
+        """
+        Compute method.
+        
+        Parameters:
+            X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
+            
+        Returns:
+            D: the Generalized Gower matrix for the data matrix `X`.
+        """
+
+        D1, D2, D3 = get_dist_matrix_objects(X=X, p1=self.p1, p2=self.p2, p3=self.p3, 
+                                               d1=self.d1, d2=self.d2, d3=self.d3, 
+                                               q=self.q, robust_method=self.robust_method, epsilon=self.epsilon, 
+                                               alpha=self.alpha, n_iters=self.n_iters, weights=self.weights)
+
+        D1_2 = D1**2  ; D2_2 = D2**2 ; D3_2 = D3**2
+
+        VG1, VG2, VG3 = compute_geometric_var(D1_2), compute_geometric_var(D2_2), compute_geometric_var(D3_2)
+
+        D1_std = D1_2/VG1 if VG1 > 0 else D1_2 
+        D2_std = D2_2/VG2 if VG2 > 0 else D2_2 
+        D3_std = D3_2/VG3 if VG3 > 0 else D3_2
+        D_2 = D1_std + D2_std + D3_std
+        D = np.sqrt(D_2)
+
+        return D 
+
+################################################################################
+
 def generalized_gower_dist_matrix(X, p1, p2, p3, d1, d2, d3, q=1, robust_method='trimmed', alpha=0.05, epsilon=0.05, n_iters=20, weights=None):        
     """
     Calculates the Generalized Gower matrix for a data matrix.
@@ -304,7 +369,7 @@ def generalized_gower_dist_matrix(X, p1, p2, p3, d1, d2, d3, q=1, robust_method=
 
         dist_2 = dist**2
         geom_var = geometric_variability(dist_2)
-        dist_2_std = dist_2/geom_var if geom_var > 0 else dist_2 
+        dist_2_std = dist_2/geom_var if geom_var > 1e-15 else dist_2 
         dist_2_std_sum += dist_2_std
     
     dist = np.sqrt(dist_2_std_sum)
@@ -411,10 +476,126 @@ def simple_gower_dist_matrix(X, p1, p2, p3):
 
     return D
 
+################################################################################
+
+def compute_gram_matrix(dist, centering_matrix):
+    """
+    Algebraic formula: G = -(1/2) * J * D * J
+    CRITICAL PERFORMANCE BOTTLENECK:
+    1. Complexity: O(n^3) due to double matrix multiplication (@).
+    2. Memory: Inefficient. Requires allocating and storing the dense 
+       'centering_matrix' (J) of size (n, n), which is heavy for large datasets. 
+    gram_matrix = -(1/2)*(centering_matrix @ dist @ centering_matrix)
+    """
+    gram_matrix = -(1/2)*(centering_matrix @ dist @ centering_matrix)
+
+    return gram_matrix
 
 ################################################################################
 
-def compute_cross_product_sum(matrices: list[np.ndarray]) -> np.ndarray:
+def compute_gram_matrix_faster(dist):
+    """
+    Optimized implementation using Vectorization and Broadcasting.
+    Mathematically equivalent to G = -(1/2) * J * D * J, but computationally superior.
+    """
+    # 1. Calculate means
+    # Complexity: O(n^2). This is linear with respect to the number of elements.
+    row_means = np.mean(dist, axis=1, keepdims=True)
+    col_means = np.mean(dist, axis=0, keepdims=True)
+    grand_mean = np.mean(dist)
+    
+    # 2. Vectorized Double Centering
+    # Algebraic expansion: D_centered = D_ij - row_mean_i - col_mean_j + grand_mean
+    #
+    # OPTIMIZATION GAINS:
+    # - Speed: Reduces complexity from Cubic O(n^3) to Quadratic O(n^2).
+    #          For n=10,000, this is orders of magnitude faster.
+    # - Memory: 'In-place' style broadcasting avoids creating the huge (n, n) 
+    #           centering matrix full of ones, saving GBs of RAM.
+    centered = dist - row_means - col_means + grand_mean
+
+    # 3. Scaling to obtain Gram Matrix
+    gram_matrix = -(1/2) * centered
+
+    return gram_matrix
+
+################################################################################
+
+def gram_matrix_psd_transformation(dist_2_std, eig_min_val, d=2.5):
+    """
+    Applies the Lingoes (1971) correction to force a PSD Gram matrix.
+    
+    The transformation D_new^2 = D^2 + omega(11' - I) shifts all eigenvalues 
+    by omega/2. To ensure the smallest eigenvalue becomes non-negative:
+        lambda_new = lambda_min + omega/2 >= 0
+    
+    Since omega is defined as d * |lambda_min|, this implies:
+        d * |lambda_min| / 2 >= |lambda_min|  ==>  d >= 2
+    
+    Parameters
+    ----------
+    d : float
+        Controls the magnitude of the correction. 
+        Must be >= 2 to theoretically guarantee PSD properties.
+        A value of 2.5 is recommended to account for floating-point numerical errors.
+    """
+    omega = d * np.abs(eig_min_val)
+    
+    # Apply additive constant correction: D_new^2 = D^2 + omega(1 - I)
+    # Instead of creating full ones/identity matrices, we add scalar and subtract from diagonal
+    dist_2_std = dist_2_std + omega
+    np.fill_diagonal(dist_2_std, np.diag(dist_2_std) - omega)
+    
+    # Recompute Gram Matrix with new distances
+    gram_matrix = compute_gram_matrix_faster(dist_2_std)
+
+    return gram_matrix
+
+################################################################################
+
+def compute_gram_matrix_sqrt(gram_matrix):
+# Compute Square Root of Gram Matrix: G^(1/2)
+
+    U, S, V = np.linalg.svd(gram_matrix)
+    S = np.clip(S, 0, None)
+    gram_matrix_sqrt = U @ np.diag(np.sqrt(S)) @ V
+
+    return gram_matrix_sqrt
+
+################################################################################
+
+def compute_gram_matrix_sqrt_faster(gram_matrix, n_components=30):
+# Compute Square Root of Gram Matrix: G^(1/2)
+
+    # OPTIMIZATION: Use Truncated Eigendecomposition if n_components is set
+    n = len(gram_matrix)
+    if n_components is not None and n_components < n - 1 and n > 100: # Para n pequeño, eigh es más rápido que eigsh
+        # Efficient approximation using ARPACK (similar to RSpectra)
+        # 'LA' = Largest Algebraic (most significant components)
+        evals, evecs = eigsh(gram_matrix, k=n_components, which='LA')
+        
+        # Clip negative eigenvalues (numerical noise)
+        evals = np.clip(evals, 0, None)
+        
+        # Reconstruct sqrt(G) = U @ diag(sqrt(s)) @ U.T
+        gram_matrix_sqrt = evecs @ np.diag(np.sqrt(evals)) @ evecs.T
+    else:
+        # Fallback to full decomposition
+        # eigh is optimized for symmetric matrices (faster than svd)
+        evals, evecs = eigh(gram_matrix)
+        evals = np.clip(evals, 0, None)
+        gram_matrix_sqrt = evecs @ np.diag(np.sqrt(evals)) @ evecs.T
+
+    return gram_matrix_sqrt
+
+################################################################################
+
+def compute_cross_product_sum(sqrtG1, sqrtG2, sqrtG3):
+    return sqrtG1@sqrtG2 + sqrtG1@sqrtG3 + sqrtG2@sqrtG1 + sqrtG2@sqrtG3 + sqrtG3@sqrtG1 + sqrtG3@sqrtG2
+
+################################################################################
+
+def compute_cross_product_sum_faster(matrices: list[np.ndarray]) -> np.ndarray:
     """
     Efficiently computes the sum of cross-products between all matrices in the list.
     Formula: (Sum(M))^2 - Sum(M^2)
@@ -431,7 +612,7 @@ def compute_cross_product_sum(matrices: list[np.ndarray]) -> np.ndarray:
     """
     # 1. Sum all matrices (Very cheap: O(N^2))
     # S = A + B + C
-    sum_of_matrices = np.sum(matrices)
+    sum_of_matrices = sum(matrices)
     
     # 2. Square the total sum (1 Matrix Multiplication)
     # Total = S @ S
@@ -439,7 +620,7 @@ def compute_cross_product_sum(matrices: list[np.ndarray]) -> np.ndarray:
     
     # 3. Calculate sum of individual squares (k Matrix Multiplications)
     # Individual = A@A + B@B + C@C
-    sum_of_squares = np.sum(m @ m for m in matrices)
+    sum_of_squares = sum(m @ m for m in matrices)
     
     # 4. Subtract to isolate cross-terms
     cross_product_sum = squared_sum - sum_of_squares
@@ -448,12 +629,10 @@ def compute_cross_product_sum(matrices: list[np.ndarray]) -> np.ndarray:
 
 ################################################################################
 
-# TODO: OPTIMIZAR LA FUNCION 
-
 def related_metric_scaling_dist_matrix(
         X, p1, p2, p3,d1, d2, d3, 
         q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None,
-        tol=1e-6, d=2.5, Gs_PSD_transformation=True
+        Gs_PSD_transformation=True
 ):
     """
     Calculates the Related Metric Scaling matrix for a data matrix.
@@ -500,44 +679,149 @@ def related_metric_scaling_dist_matrix(
     identity_matrix = np.identity(n)
     centering_matrix = identity_matrix - (1/n)*(ones @ ones_T)
      
-    gram_matrix_sqrt = []
+    gram_matrix_list, gram_matrix_sqrt_list = [], []
+
     for i, dist in enumerate([dist1, dist2, dist3], start=1):
 
         dist_2 = dist**2
         geom_var = geometric_variability(dist_2)
-        dist_2_std = dist_2/geom_var if geom_var > 0 else dist_2 
-        
-        gram_matrix = -(1/2)*(centering_matrix @ dist_2_std @ centering_matrix)
-        gram_matrix_sum += gram_matrix
+        dist_2_std = dist_2/geom_var if geom_var > 1e-15 else dist_2 
+        gram_matrix = compute_gram_matrix(dist_2_std, centering_matrix)
 
         if Gs_PSD_transformation == True :
-
             v = np.real(np.linalg.eigvals(gram_matrix))
-            v[np.isclose(v, 0, atol=tol)] = 0
+            v[np.isclose(v, 0, atol=1e-15)] = 0
             gram_matrix_psd = np.all(v >= 0)
             if not gram_matrix_psd:
                 raise Warning(f'Gram matrix for d{i} is not PSD, a transformation to force it will be applied.')   
             omega = d * np.abs(np.min(v))  
             dist_2_std  = dist_2_std + omega*ones_matrix - omega*identity_matrix
-            gram_matrix = -(1/2)*(centering_matrix)
+            gram_matrix = -(1/2)*(centering_matrix @ dist_2_std @ centering_matrix)
+        
+        gram_matrix_sqrt = compute_gram_matrix_sqrt(gram_matrix)   
 
-        U, S, V = np.linalg.svd(gram_matrix)
-        S = np.clip(S, 0, None)
-        gram_matrix_sqrt.append(U @ np.diag(np.sqrt(S)) @ V)
-    
-    gram_matrices_cross_product_sum = compute_cross_product_sum([gram_matrix_sqrt[i] for i in range(len(gram_matrix_sqrt))]) 
-    gram_matrix = gram_matrix_sum - (1/3) * gram_matrices_cross_product_sum
-    g = np.diag(gram_matrix) 
+        gram_matrix_list.append(gram_matrix)
+        gram_matrix_sqrt_list.append(gram_matrix_sqrt)
+            
+    gram_matrices_sum = sum(gram_matrix_list)
+    gram_matrices_sqrt_cross_product_sum = compute_cross_product_sum(sqrtG1=gram_matrix_sqrt_list[0], sqrtG2=gram_matrix_sqrt_list[1], sqrtG3=gram_matrix_sqrt_list[2]) 
+    gram_matrix_final = gram_matrices_sum - (1/3) * gram_matrices_sqrt_cross_product_sum
+    g = np.diag(gram_matrix_final) 
     g =  np.reshape(g, (len(g), 1))  
     g_T = np.reshape(g, (1, len(g)))   
-    dist_2 = g @ ones_T + ones @ g_T - 2*gram_matrix
-    dist_2[np.isclose(dist_2, 0, atol=tol)] = 0
-    dist = np.sqrt(dist_2)
+    dist_2_final = g @ ones_T + ones @ g_T - 2*gram_matrix_final
+    dist_2_final[np.isclose(dist_2_final, 0, atol=1e-15)] = 0
+    dist_final = np.sqrt(dist_2_final)
 
-    return dist
+    return dist_final
 
+################################################################################
 
+def related_metric_scaling_dist_matrix_faster(
+        X, p1, p2, p3,d1, d2, d3, 
+        q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None,
+        Gs_PSD_transformation=True, n_components=30
+):
+    """
+    Calculates a faster estimation of the Related Metric Scaling matrix for a data matrix.
+    
+    Parameters:
+        X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
+        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
+        d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
+        d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
+        d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
+        q: the parameter that defines the Minkowski distance. Must be a positive integer.
+        metrobust_methodhod: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
+        alpha : a real number in [0,1] that is used if `robust_method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
+        epsilon : parameter used by the Delvin transformation. epsilon=0.05 is recommended. Only needed when d1 = 'robust_mahalanobis'.
+        n_iter : maximum number of iterations run by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
+        weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
+        tol: a tolerance value to round the close-to-zero eigenvalues of the Gramm matrices.
+        Gs_PSD_trans: controls if a transformation is applied to enforce positive semi-definite Gramm matrices.
+        d: a parameter that controls the omega definition involved in the transformation mentioned above.    
 
+    Returns:
+        D: the Related Metric Scaling matrix for the data matrix `X`.
+    """
+    dist1, dist2, dist3 = compute_dist_matrices(
+        X=X, 
+        p1=p1, 
+        p2=p2, 
+        p3=p3, 
+        d1=d1, 
+        d2=d2, 
+        d3=d3, 
+        q=q, 
+        robust_method=robust_method, 
+        epsilon=epsilon, 
+        alpha=alpha, 
+        n_iters=n_iters, 
+        weights=weights)
+    
+    n = len(dist1)
+
+    # Pre-allocate accumulator for the sum of Gram matrices
+    gram_matrices_sum = np.zeros((n, n))
+    gram_matrix_list, gram_matrix_sqrt_list = [], []
+
+    for i, dist in enumerate([dist1, dist2, dist3], start=1):
+        
+        # Handle cases where a variable type is missing (empty distance matrix)
+        if np.sum(dist) == 0:
+            gram_matrix_sqrt_list.append(np.zeros((n, n)))
+            continue
+        
+        dist_2 = dist**2
+        geom_var = geometric_variability(dist_2)
+        dist_2_std = dist_2/geom_var if geom_var > 1e-15 else dist_2 
+
+        gram_matrix = compute_gram_matrix_faster(dist_2_std)
+
+        # PSD Check and Transformation
+        if Gs_PSD_transformation:
+            # OPTIMIZATION: Check for negative eigenvalues efficiently
+            # We first try to find just the smallest eigenvalue (SA = Smallest Algebraic)
+            try:
+                # Use eigsh to find only 1 smallest eigenvalue. Much faster than full eig.
+                eig_min_val = eigsh(gram_matrix, k=1, which='SA', return_eigenvectors=False)[0]
+            except Exception:
+                # Fallback for very small matrices or convergence issues
+                eig_min_val = np.min(np.linalg.eigvals(gram_matrix))
+
+            if eig_min_val < -1e-15:
+                warnings.warn(f'Gram matrix for d{i} is not PSD (min eig={eig_min_val:.2e}). Transformation applied.')
+                gram_matrix = gram_matrix_psd_transformation(dist_2_std, eig_min_val)
+         
+        gram_matrix_sqrt = compute_gram_matrix_sqrt_faster(gram_matrix, n_components)  
+        
+        gram_matrix_list.append(gram_matrix)
+        gram_matrix_sqrt_list.append(gram_matrix_sqrt)
+    
+    # Sum individual gram matrices sum(Gj for j=1,2,3)
+    gram_matrices_sum = sum(gram_matrix_list)
+    # Calculate cross-products sum using the optimized helper
+    # Formula: sum(Gi^1/2 Gj^1/2) for i!=j
+    gram_matrices_sqrt_cross_product_sum = compute_cross_product_sum_faster(gram_matrix_sqrt_list) 
+    # Final Gram Matrix Combination: G_relms = sum(G_k) - (1/m) * sum_{k!=l} ...
+    # m = 3 in this specific implementation context    
+    gram_matrix_final = gram_matrices_sum - (1/3) * gram_matrices_sqrt_cross_product_sum
+
+    # Recover Euclidean Distances from Final Gram Matrix
+    # Formula: D^2_ij = G_ii + G_jj - 2G_ij
+    g_diag = np.diag(gram_matrix_final)
+    
+    # Use broadcasting for O(n^2) reconstruction
+    dist_2_final = g_diag[:, None] + g_diag[None, :] - 2 * gram_matrix_final
+    
+    # Cleanup numerical noise
+    dist_2_final[np.abs(dist_2_final) < 1e-15] = 0
+    dist_2_final = np.clip(dist_2_final, 0, None)
+    
+    # Recover de final distance matrix
+    dist_final = np.sqrt(dist_2_final)
+
+    return dist_final
 
 ################################################################################
 
@@ -648,7 +932,8 @@ class RelMSDistMatrix:
         sqrtG2 = U2 @ np.diag(np.sqrt(S2)) @ V2 
         sqrtG3 = U3 @ np.diag(np.sqrt(S3)) @ V3
 
-        G = G_1 + G_2 + G_3 - (1/3)*(sqrtG1@sqrtG2 + sqrtG1@sqrtG3 + sqrtG2@sqrtG1 + sqrtG2@sqrtG3 + sqrtG3@sqrtG1 + sqrtG3@sqrtG2)
+        G_cross_product_sum = compute_cross_product_sum(sqrtG1, sqrtG2, sqrtG3)
+        G = G_1 + G_2 + G_3 - (1/3) * G_cross_product_sum
         g = np.diag(G) 
         g =  np.reshape(g, (len(g), 1))  
         g_T = np.reshape(g, (1, len(g)))   
@@ -657,113 +942,5 @@ class RelMSDistMatrix:
         D = np.sqrt(D_2_)
  
         return D    
-
-################################################################################
-
-def data_preprocessing(X, frac_sample_size,   ):
-    """
-    Preprocess data in the way as needed by `FastGG` class.
-
-    Parameters (inputs)
-    ----------
-    X: a pandas/polars data-frame.
-    frac_sample_size: the sample size in proportional terms.
-      : the random seed for the random elements of the function.
-
-    Returns (outputs)
-    -------
-    X_sample: a polars df with the sample of `X`.
-    X_out_sample: a polars df with the out of sample of `X`.
-    sample_index: the index of the sample observations/rows.
-    out_sample_index: the index of the out of sample observations/rows.
-    """
-
-    if not (0 < frac_sample_size <= 1):
-       raise ValueError('frac_sample_size must be in (0,1].')
-
-    if isinstance(X, (pd.DataFrame, pl.DataFrame)):
-        X = X.to_numpy()
-    
-    n = len(X)
-
-    if frac_sample_size < 1:
-        n_sample = int(frac_sample_size*n)
-        index = np.arange(0,n)
-        np.random.seed(  )
-        sample_index = np.random.choice(index, size=n_sample, replace=False)
-        out_sample_index = np.array([x for x in index if x not in sample_index])
-        X_sample = X[sample_index,:] 
-        X_out_sample = X[out_sample_index,:] 
-    else:
-        X_sample = X
-        sample_index =  np.arange(0,n)
-        X_out_sample = np.array([])
-        out_sample_index = np.array([])
-
-    return X_sample, X_out_sample, sample_index, out_sample_index
-
-################################################################################
-
-'''
-class FastGGowerDistMatrix:
-    """
-    Calculates the the Generalized Gower matrix of a sample of a given data matrix.
-    """
-
-    def __init__(self, frac_sample_size=0.1,   =123, p1=None, p2=None, p3=None, 
-                 d1='robust_mahalanobis', d2='jaccard', d3='matching', 
-                 robust_method='trimmed', alpha=0.05, epsilon=0.05, n_iters=20, q=1, 
-                  =False,  =1000,  =5, weights=None) :
-        """
-        Constructor method.
-        
-        Parameters:
-            frac_sample_size: the sample size in proportional terms.
-            p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
-            d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
-            d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
-            d3: name of the distance to be computed for multi-class variables. Must be an string in ['matching'].
-            q: the parameter that defines the Minkowski distance. Must be a positive integer.
-            robust_method: the method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
-            alpha : a real number in [0,1] that is used if `method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
-            epsilon: parameter used by the Delvin algorithm that is used when computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
-            n_iters: maximum number of iterations used by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
-             : whether the geometric variability estimation will be full (False) or fast (True).
-             : sample size to be used to make the estimation of the geometric variability.
-             : number of samples to be used to make the estimation of the geometric variability.
-              : the random seed used for the (random) sample elements.
-            weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
-        """
-        self.   =   ; self.frac_sample_size = frac_sample_size; self.p1 = p1; self.p2 = p2; self.p3 = p3; 
-        self.d1 = d1; self.d2 = d2; self.d3 = d3; self.robust_method = robust_method; self.alpha = alpha; self.epsilon = epsilon; 
-        self.n_iters = n_iters; self.  =  ; self.  =  ; self.  =  ; 
-        self.q = q; self.weights = weights
-
-    def compute(self, X):
-        """
-        Compute method: computes the Generalized Gower function for the defined sample of data.
-        
-        Parameters:
-            X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
-        """
-
-        X_sample, X_out_sample, sample_index, out_sample_index = data_preprocessing(X=X, frac_sample_size=self.frac_sample_size, 
-                                                                                      =self.  )
-       
-        sample_weights = self.weights[sample_index] if self.weights is not None else None
-
-        GGower_matrix = GGowerDistMatrix(p1=self.p1, p2=self.p2, p3=self.p3, 
-                                         d1=self.d1, d2=self.d2, d3=self.d3, q=self.q,
-                                         robust_method=self.robust_method, alpha=self.alpha, 
-                                         epsilon=self.epsilon, n_iters=self.n_iters,
-                                          =self. ,  =self. , 
-                                          =self. , weights=sample_weights)
-        
-        self.D_GGower = GGower_matrix.compute(X=X_sample)
-        self.sample_index = sample_index
-        self.out_sample_index = out_sample_index
-        self.X_sample = X_sample
-        self.X_out_sample = X_out_sample
-'''
 
 ################################################################################
