@@ -1,1 +1,4 @@
-robust-mixed-dist==0.1.11
+polars
+numpy
+pandas
+scipy<=1.16.2

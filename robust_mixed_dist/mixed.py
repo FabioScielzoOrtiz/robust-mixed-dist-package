@@ -61,6 +61,89 @@ def get_dist_objects():
         'hamming': hamming_dist        
     }
 
+################################################################################
+
+def simple_gower_dist(xi, xr, X, p1, p2, p3) :
+    """
+    Compute method.
+    
+    Parameters:
+        xi, xr: a pair of mixed data vectors. They represent a couple of statistical observations.
+        X: a pandas/polars data-frame or a numpy array. It represents a data matrix.
+        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
+
+    Returns:
+        dist: the Simple Gower distance between the observations `xi` and `xr`.
+    """    
+
+    if hasattr(X, "to_numpy"):
+        X = X.to_numpy()
+    xi = ensure_flat_array(xi)
+    xr = ensure_flat_array(xr)
+
+    dist_objects = get_dist_objects()
+
+    X_quant = X[:,0:p1]  
+    xi_quant = xi[0:p1] ; xr_quant = xr[0:p1] ; 
+    xi_bin = xi[(p1):(p1+p2)] ; xr_bin = xr[(p1):(p1+p2)]
+    xi_multi = xi[(p1+p2):(p1+p2+p3)] ; xr_multi = xr[(p1+p2):(p1+p2+p3)]
+    R = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
+
+    dist1 = np.sum(np.abs(xi_quant - xr_quant)/R) if p1 > 0 else 0
+    dist2 = dist_objects['jaccard'](xi_bin, xr_bin) if p2 > 0 else 0
+    dist3 = dist_objects['hamming'](xi_multi, xr_multi) if p3 > 0 else 0
+    dist = dist1 + dist2 + dist3
+
+    return dist
+
+################################################################################
+
+def simple_gower_dist_matrix(X, p1, p2, p3):
+    """
+    Cálculo matricial de la distancia simple de Gower entre todas las filas de X.
+
+    Parameters:
+        X: np.ndarray o DataFrame (se convierte a np.ndarray).
+        p1: número de columnas numéricas.
+        p2: número de columnas binarias.
+        p3: número de columnas categóricas (multi-clase).
+
+    Returns:
+        D: matriz de distancias (n x n) con la distancia de Gower simple entre observaciones.
+    """
+
+    if hasattr(X, "to_numpy"):
+        X = X.to_numpy()
+
+    dist_matrix_objects = get_dist_matrix_objects()
+
+    # Separar bloques
+    X_quant = X[:, 0:p1] if p1 > 0 else None
+    X_bin = X[:, p1:p1 + p2] if p2 > 0 else None
+    X_multi = X[:, p1 + p2:p1 + p2 + p3] if p3 > 0 else None
+
+    n = X.shape[0]
+    D = np.zeros((n, n))
+
+    # Distancia cuantitativa: Manhattan normalizada por rango
+    if p1 > 0:
+        R = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
+        R[R == 0] = 1  # evitar división por cero
+        X_quant_norm = X_quant / R
+        dist_quant = dist_matrix_objects['minkowski'](X_quant_norm, q=1)
+        D += dist_quant
+
+    # Distancia binaria: Jaccard
+    if p2 > 0:
+        dist_bin = dist_matrix_objects['jaccard'](X_bin)
+        D += dist_bin
+
+    # Distancia categórica: Hamming (simple coincidencia)
+    if p3 > 0:
+        dist_multi = dist_matrix_objects['hamming'](X_multi)
+        D += dist_multi
+
+    return D
 
 ################################################################################
 
@@ -264,12 +347,13 @@ def compute_geometric_var(
     )
        
     D1_2, D2_2, D3_2 = D1**2, D2**2, D3**2
-    VG1, VG2, VG3 = geometric_variability(D1_2), geometric_variability(D2_2), geometric_variability(D3_2)
+    VG1, VG2, VG3 = geometric_variability(D1_2, weights), geometric_variability(D2_2, weights), geometric_variability(D3_2, weights)
 
     return VG1, VG2, VG3
 
 ################################################################################
 
+'''
 class GGowerDistMatrix: 
     """
     Calculates the Generalized Gower matrix for a data matrix.
@@ -311,14 +395,14 @@ class GGowerDistMatrix:
             D: the Generalized Gower matrix for the data matrix `X`.
         """
 
-        D1, D2, D3 = get_dist_matrix_objects(X=X, p1=self.p1, p2=self.p2, p3=self.p3, 
+        D1, D2, D3 = compute_dist_matrices(X=X, p1=self.p1, p2=self.p2, p3=self.p3, 
                                                d1=self.d1, d2=self.d2, d3=self.d3, 
                                                q=self.q, robust_method=self.robust_method, epsilon=self.epsilon, 
                                                alpha=self.alpha, n_iters=self.n_iters, weights=self.weights)
 
         D1_2 = D1**2  ; D2_2 = D2**2 ; D3_2 = D3**2
 
-        VG1, VG2, VG3 = compute_geometric_var(D1_2), compute_geometric_var(D2_2), compute_geometric_var(D3_2)
+        VG1, VG2, VG3 = geometric_variability(D1_2, self.weights), geometric_variability(D2_2, self.weights), geometric_variability(D3_2, self.weights)
 
         D1_std = D1_2/VG1 if VG1 > 0 else D1_2 
         D2_std = D2_2/VG2 if VG2 > 0 else D2_2 
@@ -327,10 +411,15 @@ class GGowerDistMatrix:
         D = np.sqrt(D_2)
 
         return D 
+'''
 
 ################################################################################
 
-def generalized_gower_dist_matrix(X, p1, p2, p3, d1, d2, d3, q=1, robust_method='trimmed', alpha=0.05, epsilon=0.05, n_iters=20, weights=None):        
+def generalized_gower_dist_matrix(
+        X, p1, p2, p3, d1, d2, d3, 
+        q=1, robust_method='trimmed', alpha=0.05, epsilon=0.05, n_iters=20, weights=None,
+        return_combined_distances = False
+    ):        
     """
     Calculates the Generalized Gower matrix for a data matrix.
     
@@ -363,25 +452,37 @@ def generalized_gower_dist_matrix(X, p1, p2, p3, d1, d2, d3, q=1, robust_method=
         epsilon=epsilon, 
         alpha=alpha, 
         n_iters=n_iters, 
-        weights=weights)
+        weights=weights
+    )
     
+    n = len(dist1)
+    dist_2_std_sum = np.zeros((n, n))
+
     for dist in [dist1, dist2, dist3]:
 
         dist_2 = dist**2
-        geom_var = geometric_variability(dist_2)
-        dist_2_std = dist_2/geom_var if geom_var > 1e-15 else dist_2 
+        geom_var = geometric_variability(dist_2, weights=weights)
+        dist_2_std = dist_2 / geom_var if geom_var > 1e-15 else dist_2 
         dist_2_std_sum += dist_2_std
     
     dist = np.sqrt(dist_2_std_sum)
+
+    if return_combined_distances:
+        return dist, dist1, dist2, dist3
 
     return dist 
 
 ################################################################################
 
 def generalized_gower_dist(xi, xr, p1, p2, p3, d1, d2, d3, q=1, S=None, geom_var_1=None, geom_var_2=None, geom_var_3=None):
+    """
+    xi, xr: a pair of mixed data vectors. They represent a couple of statistical observations.
+    """
    
     dist1, dist2, dist3 = compute_distances(xi=xi, xr=xr, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3, q=q, S=S)
     
+    dist_2_std_sum = 0
+
     for dist, geom_var in zip([dist1, dist2, dist3], [geom_var_1, geom_var_2, geom_var_3]):
 
         dist_2 = dist**2 
@@ -391,90 +492,6 @@ def generalized_gower_dist(xi, xr, p1, p2, p3, d1, d2, d3, q=1, S=None, geom_var
     dist = np.sqrt(dist_2_std_sum)
 
     return dist
-
-################################################################################
-    
-def simple_gower_dist(xi, xr, X, p1, p2, p3) :
-    """
-    Compute method.
-    
-    Parameters:
-        xi, xr: a pair of quantitative vectors. They represent a couple of statistical observations.
-        X: a pandas/polars data-frame or a numpy array. It represents a data matrix.
-        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
-
-    Returns:
-        dist: the Simple Gower distance between the observations `xi` and `xr`.
-    """    
-
-    if hasattr(X, "to_numpy"):
-        X = X.to_numpy()
-    xi = ensure_flat_array(xi)
-    xr = ensure_flat_array(xr)
-
-    dist_objects = get_dist_objects()
-
-    X_quant = X[:,0:p1]  
-    xi_quant = xi[0:p1] ; xr_quant = xr[0:p1] ; 
-    xi_bin = xi[(p1):(p1+p2)] ; xr_bin = xr[(p1):(p1+p2)]
-    xi_multi = xi[(p1+p2):(p1+p2+p3)] ; xr_multi = xr[(p1+p2):(p1+p2+p3)]
-    R = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
-
-    dist1 = np.sum(np.abs(xi_quant - xr_quant)/R) if p1 > 0 else 0
-    dist2 = dist_objects['jaccard'](xi_bin, xr_bin) if p2 > 0 else 0
-    dist3 = dist_objects['hamming'](xi_multi, xr_multi) if p3 > 0 else 0
-    dist = dist1 + dist2 + dist3
-
-    return dist
-
-################################################################################
-
-def simple_gower_dist_matrix(X, p1, p2, p3):
-    """
-    Cálculo matricial de la distancia simple de Gower entre todas las filas de X.
-
-    Parameters:
-        X: np.ndarray o DataFrame (se convierte a np.ndarray).
-        p1: número de columnas numéricas.
-        p2: número de columnas binarias.
-        p3: número de columnas categóricas (multi-clase).
-
-    Returns:
-        D: matriz de distancias (n x n) con la distancia de Gower simple entre observaciones.
-    """
-
-    if hasattr(X, "to_numpy"):
-        X = X.to_numpy()
-
-    dist_matrix_objects = get_dist_matrix_objects()
-
-    # Separar bloques
-    X_quant = X[:, 0:p1] if p1 > 0 else None
-    X_bin = X[:, p1:p1 + p2] if p2 > 0 else None
-    X_multi = X[:, p1 + p2:p1 + p2 + p3] if p3 > 0 else None
-
-    n = X.shape[0]
-    D = np.zeros((n, n))
-
-    # Distancia cuantitativa: Manhattan normalizada por rango
-    if p1 > 0:
-        R = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
-        R[R == 0] = 1  # evitar división por cero
-        X_quant_norm = X_quant / R
-        dist_quant = dist_matrix_objects['minkowski'](X_quant_norm, q=1)
-        D += dist_quant
-
-    # Distancia binaria: Jaccard
-    if p2 > 0:
-        dist_bin = dist_matrix_objects['jaccard'](X_bin)
-        D += dist_bin
-
-    # Distancia categórica: Hamming (simple coincidencia)
-    if p3 > 0:
-        dist_multi = dist_matrix_objects['hamming'](X_multi)
-        D += dist_multi
-
-    return D
 
 ################################################################################
 
@@ -500,24 +517,45 @@ def compute_gram_matrix_faster(dist):
     """
     # 1. Calculate means
     # Complexity: O(n^2). This is linear with respect to the number of elements.
-    row_means = np.mean(dist, axis=1, keepdims=True)
-    col_means = np.mean(dist, axis=0, keepdims=True)
-    grand_mean = np.mean(dist)
+    dist_row_means = np.mean(dist, axis=1, keepdims=True)
+    dist_col_means = np.mean(dist, axis=0, keepdims=True)
+    dist_mean = np.mean(dist)
     
     # 2. Vectorized Double Centering
-    # Algebraic expansion: D_centered = D_ij - row_mean_i - col_mean_j + grand_mean
-    #
+    # Algebraic expansion: 
+    # (J * D * J)_{ij} = d_{ij} - \mu_{i.} - \mu_{.j} + \mu_{d}
+    # J * D * J = D - dist_row_means - dist_col_means + dist_mean
+    # BROADCASTING MECHANISM:
+    # NumPy performs this operation conceptually AS IF all operands were 
+    # full (n, n) matrices. It implicitly expands the dimensions.
+
     # OPTIMIZATION GAINS:
     # - Speed: Reduces complexity from Cubic O(n^3) to Quadratic O(n^2).
-    #          For n=10,000, this is orders of magnitude faster.
-    # - Memory: 'In-place' style broadcasting avoids creating the huge (n, n) 
-    #           centering matrix full of ones, saving GBs of RAM.
-    centered = dist - row_means - col_means + grand_mean
+    # - Memory: This expansion is VIRTUAL. NumPy does not actually allocate 
+    #           memory for the expanded matrices. It subtracts elements on-the-fly,
+    #           avoiding the creation of huge intermediate matrices.
+    dist_double_centered = dist - dist_row_means - dist_col_means + dist_mean
 
     # 3. Scaling to obtain Gram Matrix
-    gram_matrix = -(1/2) * centered
+    dist_gram_matrix = -(1/2) * dist_double_centered
 
-    return gram_matrix
+    return dist_gram_matrix
+
+################################################################################
+
+def check_gram_matrix_psd(gram_matrix, atol=1e-15):
+    # OPTIMIZATION: Check for negative eigenvalues efficiently
+    # We first try to find just the smallest eigenvalue (SA = Smallest Algebraic)
+    try:
+        # Use eigsh to find only 1 smallest eigenvalue. Much faster than full eig.
+        eig_min_val = eigsh(gram_matrix, k=1, which='SA', return_eigenvectors=False)[0]
+    except Exception:
+        # Fallback for very small matrices or convergence issues
+        eig_min_val = np.min(np.linalg.eigvals(gram_matrix))
+
+    is_psd = eig_min_val >= -atol
+
+    return eig_min_val, is_psd
 
 ################################################################################
 
@@ -554,36 +592,63 @@ def gram_matrix_psd_transformation(dist_2_std, eig_min_val, d=2.5):
 ################################################################################
 
 def compute_gram_matrix_sqrt(gram_matrix):
-# Compute Square Root of Gram Matrix: G^(1/2)
-
-    U, S, V = np.linalg.svd(gram_matrix)
+    # Compute Square Root of Gram Matrix: G^(1/2)
+    
+    # SVD Decomposition: G = U @ diag(S) @ V.T
+    # Note: np.linalg.svd returns V transposed (Vt) automatically.
+    # U: (n, n) - Left Singular Vectors
+    # S: (n,)   - Singular Values (sorted descending)
+    # Vt: (n, n) - Right Singular Vectors (already transposed)
+    U, S, Vt = np.linalg.svd(gram_matrix)
+    
+    # Clip numerical noise (singular values of Gram matrix must be >= 0)
     S = np.clip(S, 0, None)
-    gram_matrix_sqrt = U @ np.diag(np.sqrt(S)) @ V
+    
+    # Reconstruct sqrt(G) = U @ diag(sqrt(S)) @ Vt
+    # For symmetric PSD matrices, U is effectively equal to V (up to sign),
+    # making this equivalent to an eigendecomposition.
+    gram_matrix_sqrt = U @ np.diag(np.sqrt(S)) @ Vt
 
     return gram_matrix_sqrt
 
 ################################################################################
 
 def compute_gram_matrix_sqrt_faster(gram_matrix, n_components=30):
-# Compute Square Root of Gram Matrix: G^(1/2)
 
-    # OPTIMIZATION: Use Truncated Eigendecomposition if n_components is set
+    # Compute Square Root of Gram Matrix: G^(1/2)
     n = len(gram_matrix)
-    if n_components is not None and n_components < n - 1 and n > 100: # Para n pequeño, eigh es más rápido que eigsh
-        # Efficient approximation using ARPACK (similar to RSpectra)
+    
+    # OPTIMIZATION: Use Truncated Eigendecomposition if n_components is set
+    # Condition: components are fewer than full rank, and matrix is large enough to justify overhead
+    if n_components is not None and n_components < n - 1 and n > 100: 
+        # Efficient approximation using ARPACK (Lanczos algorithm)
         # 'LA' = Largest Algebraic (most significant components)
-        evals, evecs = eigsh(gram_matrix, k=n_components, which='LA')
+        
+        # S_eigsh (k,) ~ S_svd (n,)
+        # Q_eigsh (n, k) ~ U_svd (n, n)
+        # Q.T_eigsh (k, n) ~ Vt_svd (n, n)
+        evals, evecs = eigsh(gram_matrix, k=n_components, which='LA') # S = evals, Q = evecs
         
         # Clip negative eigenvalues (numerical noise)
         evals = np.clip(evals, 0, None)
         
-        # Reconstruct sqrt(G) = U @ diag(sqrt(s)) @ U.T
-        gram_matrix_sqrt = evecs @ np.diag(np.sqrt(evals)) @ evecs.T
+        # Reconstruct sqrt(G) ~= Q @ diag(sqrt(S)) @ Q.T (where Q = U, Q.T = Vt, sicne G is symmetric)
+        # Result dims: (n, k) @ (k, k) @ (k, n) -> (n, n) [Rank-k approximation]
+        gram_matrix_sqrt = evecs @ np.diag(np.sqrt(evals)) @ evecs.T 
+        
     else:
         # Fallback to full decomposition
         # eigh is optimized for symmetric matrices (faster than svd)
-        evals, evecs = eigh(gram_matrix)
+        
+        # S_eigsh (k,) = S_svd (n,)
+        # Q_eigsh (n, k) = U_svd (n, n)
+        # Q.T_eigsh (k, n) = Vt_svd (n, n)
+        evals, evecs = eigh(gram_matrix) # Q = evecs, S = evals
+        
         evals = np.clip(evals, 0, None)
+        
+        # Reconstruct sqrt(G) = Q @ diag(sqrt(S)) @ Q.T (where Q = U, Q.T = Vt, sicne G is symmetric)
+        # Result dims: (n, n) @ (n, n) @ (n, n) -> (n, n) [Exact reconstruction]
         gram_matrix_sqrt = evecs @ np.diag(np.sqrt(evals)) @ evecs.T
 
     return gram_matrix_sqrt
@@ -632,7 +697,7 @@ def compute_cross_product_sum_faster(matrices: list[np.ndarray]) -> np.ndarray:
 def related_metric_scaling_dist_matrix(
         X, p1, p2, p3,d1, d2, d3, 
         q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None,
-        Gs_PSD_transformation=True
+        Gs_PSD_transformation=True, return_combined_distances=False
 ):
     """
     Calculates the Related Metric Scaling matrix for a data matrix.
@@ -693,8 +758,8 @@ def related_metric_scaling_dist_matrix(
             v[np.isclose(v, 0, atol=1e-15)] = 0
             gram_matrix_psd = np.all(v >= 0)
             if not gram_matrix_psd:
-                raise Warning(f'Gram matrix for d{i} is not PSD, a transformation to force it will be applied.')   
-            omega = d * np.abs(np.min(v))  
+                warnings.warn(f'Gram matrix for d{i} is not PSD, a transformation to force it will be applied.')   
+            omega = 2.5 * np.abs(np.min(v))  
             dist_2_std  = dist_2_std + omega*ones_matrix - omega*identity_matrix
             gram_matrix = -(1/2)*(centering_matrix @ dist_2_std @ centering_matrix)
         
@@ -713,6 +778,9 @@ def related_metric_scaling_dist_matrix(
     dist_2_final[np.isclose(dist_2_final, 0, atol=1e-15)] = 0
     dist_final = np.sqrt(dist_2_final)
 
+    if return_combined_distances:
+        return dist_final, dist1, dist2, dist3
+    
     return dist_final
 
 ################################################################################
@@ -720,7 +788,7 @@ def related_metric_scaling_dist_matrix(
 def related_metric_scaling_dist_matrix_faster(
         X, p1, p2, p3,d1, d2, d3, 
         q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None,
-        Gs_PSD_transformation=True, n_components=30
+        Gs_PSD_transformation=True, n_components=30, atol=1e-15, return_combined_distances=False
 ):
     """
     Calculates a faster estimation of the Related Metric Scaling matrix for a data matrix.
@@ -774,22 +842,14 @@ def related_metric_scaling_dist_matrix_faster(
         
         dist_2 = dist**2
         geom_var = geometric_variability(dist_2)
-        dist_2_std = dist_2/geom_var if geom_var > 1e-15 else dist_2 
+        dist_2_std = dist_2/geom_var if geom_var > atol else dist_2 
 
         gram_matrix = compute_gram_matrix_faster(dist_2_std)
 
         # PSD Check and Transformation
         if Gs_PSD_transformation:
-            # OPTIMIZATION: Check for negative eigenvalues efficiently
-            # We first try to find just the smallest eigenvalue (SA = Smallest Algebraic)
-            try:
-                # Use eigsh to find only 1 smallest eigenvalue. Much faster than full eig.
-                eig_min_val = eigsh(gram_matrix, k=1, which='SA', return_eigenvectors=False)[0]
-            except Exception:
-                # Fallback for very small matrices or convergence issues
-                eig_min_val = np.min(np.linalg.eigvals(gram_matrix))
-
-            if eig_min_val < -1e-15:
+            eig_min_val, is_psd = check_gram_matrix_psd(gram_matrix, atol)
+            if not is_psd:
                 warnings.warn(f'Gram matrix for d{i} is not PSD (min eig={eig_min_val:.2e}). Transformation applied.')
                 gram_matrix = gram_matrix_psd_transformation(dist_2_std, eig_min_val)
          
@@ -815,10 +875,124 @@ def related_metric_scaling_dist_matrix_faster(
     dist_2_final = g_diag[:, None] + g_diag[None, :] - 2 * gram_matrix_final
     
     # Cleanup numerical noise
-    dist_2_final[np.abs(dist_2_final) < 1e-15] = 0
+    dist_2_final[np.abs(dist_2_final) < atol] = 0
     dist_2_final = np.clip(dist_2_final, 0, None)
     
     # Recover de final distance matrix
+    dist_final = np.sqrt(dist_2_final)
+
+    if return_combined_distances:
+        return dist_final, dist1, dist2, dist3
+    
+    return dist_final
+
+################################################################################
+
+def related_metric_scaling_dist(
+    xi, xr, 
+    p1, p2, p3, d1, d2, d3, 
+    q=1, S=None, 
+    geom_var_1=None, geom_var_2=None, geom_var_3=None,
+    Gs_PSD_transformation=True, 
+    n_components=30
+):
+    """
+    Calculates the Related Metric Scaling distance between a pair of observations (xi, xr).
+    
+    It projects the pair into the RMS spectral space using the provided geometric 
+    variabilities (geom_var_k) and covariance matrix (S) derived from the training sample.
+    
+    Parameters match generalized_gower_dist for consistency in clustering algorithms.
+    """
+    
+    # 1. Compute raw scalar distances between the pair
+    # Returns 3 scalar values (one for each variable type)
+    d_v1, d_v2, d_v3 = compute_distances(
+        xi=xi, xr=xr, 
+        p1=p1, p2=p2, p3=p3, 
+        d1=d1, d2=d2, d3=d3, 
+        q=q, S=S
+    )
+    
+    # Group inputs for iteration
+    raw_distances = [d_v1, d_v2, d_v3]
+    geom_vars = [geom_var_1, geom_var_2, geom_var_3]
+    
+    # We are working in a local context of N=2 (xi and xr)
+    n = 2 
+    gram_matrix_list = []
+    gram_matrix_sqrt_list = []
+    
+    # Adjust n_components: we cannot extract more components than the rank (2)
+    k_components = min(n_components, n)
+
+    # 2. Process each metric type
+    for i, (dist_val, g_var) in enumerate(zip(raw_distances, geom_vars)):
+        
+        # Handle missing data or zero variance gracefully
+        if dist_val is None or g_var is None or g_var < 1e-15:
+            # If a metric is missing/invalid, it contributes 0 to the geometric space
+            gram_matrix_list.append(np.zeros((n, n)))
+            gram_matrix_sqrt_list.append(np.zeros((n, n)))
+            continue
+
+        # Standardize the squared distance using the GLOBAL geometric variability
+        dist_2 = dist_val**2
+        dist_2_std = dist_2 / g_var
+        
+        # 3. Construct the 2x2 Squared Distance Matrix
+        # We simulate a mini-distance matrix for the pair to apply spectral logic
+        # D^2 = [[0,      d^2_std],
+        #        [d^2_std, 0     ]]
+        D_2_matrix = np.array([
+            [0.0, dist_2_std],
+            [dist_2_std, 0.0]
+        ])
+        
+        # 4. Apply Optimized Double Centering (Broadcasting)
+        # Even for 2x2, this correctly centers the matrix in the spectral space
+        gram_matrix = compute_gram_matrix_faster(D_2_matrix)
+        
+        # 5. PSD Check and Transformation (Robustness)
+        if Gs_PSD_transformation:
+            eig_min_val, is_psd = check_gram_matrix_psd(gram_matrix)
+            if not is_psd:
+                gram_matrix = gram_matrix_psd_transformation(D_2_matrix, eig_min_val)
+        
+        # 6. Compute Matrix Square Root (SVD/Eigen)
+        # Using the faster function constrained to k=2 components
+        gram_matrix_sqrt = compute_gram_matrix_sqrt_faster(gram_matrix, n_components=k_components)
+        
+        gram_matrix_list.append(gram_matrix)
+        gram_matrix_sqrt_list.append(gram_matrix_sqrt)
+
+    # 7. RMS Aggregation Formula (The Core Logic)
+    # G_relms = sum(G_k) - (1/m) * sum_{k!=l} (G_k^1/2 * G_l^1/2)
+    
+    # Sum of Gram Matrices
+    gram_matrices_sum = sum(gram_matrix_list)
+    
+    # Sum of Cross-Products: uses the optimized helper function
+    gram_matrices_sqrt_cross_product_sum = compute_cross_product_sum_faster(gram_matrix_sqrt_list)
+    
+    # Final Combination (m=3 fixed for this implementation)
+    m = 3
+    gram_matrix_final = gram_matrices_sum - (1/m) * gram_matrices_sqrt_cross_product_sum
+    
+    # 8. Recover Euclidean Distance from the Final Gram Matrix
+    # We want the distance between index 0 (xi) and index 1 (xr)
+    # Formula: D^2_ij = G_ii + G_jj - 2G_ij
+    
+    g00 = gram_matrix_final[0, 0]
+    g11 = gram_matrix_final[1, 1]
+    g01 = gram_matrix_final[0, 1]
+    
+    dist_2_final = g00 + g11 - 2 * g01
+    
+    # Numerical safety (clip negative zeros)
+    if dist_2_final < 1e-15:
+        return 0.0
+        
     dist_final = np.sqrt(dist_2_final)
 
     return dist_final
