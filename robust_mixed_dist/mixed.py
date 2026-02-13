@@ -998,6 +998,200 @@ def related_metric_scaling_dist(
     return dist_final
 
 ################################################################################
+   
+class GGowerDist: 
+    """
+    Calculates the Generalized Gower distance for a pair of data observations.
+    """
+
+    def __init__(self, p1, p2, p3, d1='euclidean', d2='sokal', d3='matching', q=1, robust_method='trimmed', alpha=0.05, epsilon=0.05, n_iters=20,
+                 VG_sample_size=300, VG_n_samples=5, random_state=123, weights=None):
+        """
+        Constructor method.
+        
+        Parameters:
+            p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
+            d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
+            d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
+            d3: name of the distance to be computed for multi-class variables. Must be an string in ['matching'].
+            q: the parameter that defines the Minkowski distance. Must be a positive integer.
+            robust_method: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
+            epsilon: parameter used by the Delvin algorithm that is used when computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
+            n_iter: maximum number of iterations used by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
+            weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
+            VG_sample_size: sample size to be used to make the estimation of the geometric variability.
+            VG_n_samples: number of samples to be used to make the estimation of the geometric variability.
+            random_state: the random seed used for the (random) sample elements.
+        """
+        self.p1 = p1 ; self.p2 = p2 ; self.p3 = p3
+        self.d1 = d1 ; self.d2 = d2 ; self.d3 = d3
+        self.q = q ; self.robust_method = robust_method ; self.alpha = alpha ; 
+        self.epsilon = epsilon ; self.n_iters = n_iters
+        self.VG_sample_size = VG_sample_size; self.VG_n_samples = VG_n_samples
+        self.random_state = random_state; self.weights = weights
+
+    def fit(self, X) :
+        """
+        Fit method that computes the geometric variability and covariance matrix to be used in 'compute' method, if needed.
+        
+        Parameters:
+            X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
+            
+        Returns:
+            D: the Generalized Gower matrix for the data matrix `X`.
+        """
+        p1 = self.p1 ; p2 = self.p2 ; p3 = self.p3
+        d1 = self.d1 ; d2 = self.d2 ; d3 = self.d3
+        self.S, self.S_robust = None, None
+
+        if d1 in ['robust_mahalanobis', 'mahalanobis']:
+
+            if isinstance(X, (pl.DataFrame, pd.DataFrame)) :
+                X = X.to_numpy()
+                
+            X_quant = X[:, 0:p1] 
+
+            if d1 == 'robust_mahalanobis':
+                self.S_robust = S_robust(X=X_quant, method=self.robust_method, alpha=self.alpha, 
+                                            epsilon=self.epsilon, n_iters=self.n_iters, weights=self.weights)
+            elif d1 == 'mahalanobis':
+                self.S = np.cov(X_quant, rowvar=False)
+
+        self.VG1, self.VG2, self.VG3 = vg_ggower_fast_estimation(X=X, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3, robust_method=self.robust_method, 
+                                                                 alpha=self.alpha, epsilon=self.epsilon, n_iters=self.n_iters,
+                                                                 VG_sample_size=self.VG_sample_size, VG_n_samples=self.VG_n_samples, 
+                                                                 random_state=self.random_state, weights=self.weights)
+    
+    def compute(self, xi, xr):
+        """
+        Compute method.
+        
+        Parameters:
+            xi, xr: a pair of quantitative vectors. They represent a couple of statistical observations.
+            
+        Returns:
+            dist: the Generalized Gower distance between the observations `xi` and `xr`.
+        """
+        dist1, dist2, dist3 = get_distances(xi=xi, xr=xr, p1=self.p1, p2=self.p2, p3=self.p3, 
+                                            d1=self.d1, d2=self.d2, d3=self.d3, 
+                                            q=self.q, S=self.S, S_robust=self.S_robust)
+        
+        dist1_2 = dist1**2 ; dist2_2 = dist2**2 ; dist3_2 = dist3**2
+        dist1_2_std = dist1_2/self.VG1 if self.VG1 > 0 else dist1_2 
+        dist2_2_std = dist2_2/self.VG2 if self.VG2 > 0 else dist2_2 
+        dist3_2_std = dist3_2/self.VG3 if self.VG3 > 0 else dist3_2 
+        dist_2 = dist1_2_std + dist2_2_std + dist3_2_std
+        dist = np.sqrt(dist_2)
+
+        return dist
+    
+################################################################################
+
+def data_preprocessing(X, frac_sample_size, random_state):
+    """
+    Preprocess data in the way as needed by `FastGG` class.
+
+    Parameters (inputs)
+    ----------
+    X: a pandas/polars data-frame.
+    frac_sample_size: the sample size in proportional terms.
+    random_state: the random seed for the random elements of the function.
+
+    Returns (outputs)
+    -------
+    X_sample: a polars df with the sample of `X`.
+    X_out_sample: a polars df with the out of sample of `X`.
+    sample_index: the index of the sample observations/rows.
+    out_sample_index: the index of the out of sample observations/rows.
+    """
+
+    if not (0 < frac_sample_size <= 1):
+       raise ValueError('frac_sample_size must be in (0,1].')
+
+    if isinstance(X, (pd.DataFrame, pl.DataFrame)):
+        X = X.to_numpy()
+    
+    n = len(X)
+
+    if frac_sample_size < 1:
+        n_sample = int(frac_sample_size*n)
+        index = np.arange(0,n)
+        np.random.seed(random_state)
+        sample_index = np.random.choice(index, size=n_sample, replace=False)
+        out_sample_index = np.array([x for x in index if x not in sample_index])
+        X_sample = X[sample_index,:] 
+        X_out_sample = X[out_sample_index,:] 
+    else:
+        X_sample = X
+        sample_index =  np.arange(0,n)
+        X_out_sample = np.array([])
+        out_sample_index = np.array([])
+
+    return X_sample, X_out_sample, sample_index, out_sample_index
+
+################################################################################
+
+class FastGGowerDistMatrix:
+    """
+    Calculates the the Generalized Gower matrix of a sample of a given data matrix.
+    """
+
+    def __init__(self, frac_sample_size=0.1, random_state=123, p1=None, p2=None, p3=None, 
+                 d1='robust_mahalanobis', d2='jaccard', d3='matching', 
+                 robust_method='trimmed', alpha=0.05, epsilon=0.05, n_iters=20, q=1, 
+                 fast_VG=False, VG_sample_size=1000, VG_n_samples=5, weights=None) :
+        """
+        Constructor method.
+        
+        Parameters:
+            frac_sample_size: the sample size in proportional terms.
+            p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
+            d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
+            d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
+            d3: name of the distance to be computed for multi-class variables. Must be an string in ['matching'].
+            q: the parameter that defines the Minkowski distance. Must be a positive integer.
+            robust_method: the method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
+            alpha : a real number in [0,1] that is used if `method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
+            epsilon: parameter used by the Delvin algorithm that is used when computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
+            n_iters: maximum number of iterations used by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
+            fast_VG: whether the geometric variability estimation will be full (False) or fast (True).
+            VG_sample_size: sample size to be used to make the estimation of the geometric variability.
+            VG_n_samples: number of samples to be used to make the estimation of the geometric variability.
+            random_state: the random seed used for the (random) sample elements.
+            weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
+        """
+        self.random_state = random_state; self.frac_sample_size = frac_sample_size; self.p1 = p1; self.p2 = p2; self.p3 = p3; 
+        self.d1 = d1; self.d2 = d2; self.d3 = d3; self.robust_method = robust_method; self.alpha = alpha; self.epsilon = epsilon; 
+        self.n_iters = n_iters; self.fast_VG = fast_VG; self.VG_sample_size = VG_sample_size; self.VG_n_samples = VG_n_samples; 
+        self.q = q; self.weights = weights
+
+    def compute(self, X):
+        """
+        Compute method: computes the Generalized Gower function for the defined sample of data.
+        
+        Parameters:
+            X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
+        """
+
+        X_sample, X_out_sample, sample_index, out_sample_index = data_preprocessing(X=X, frac_sample_size=self.frac_sample_size, 
+                                                                                    random_state=self.random_state)
+       
+        sample_weights = self.weights[sample_index] if self.weights is not None else None
+
+        GGower_matrix = GGowerDistMatrix(p1=self.p1, p2=self.p2, p3=self.p3, 
+                                         d1=self.d1, d2=self.d2, d3=self.d3, q=self.q,
+                                         robust_method=self.robust_method, alpha=self.alpha, 
+                                         epsilon=self.epsilon, n_iters=self.n_iters,
+                                         fast_VG=self.fast_VG, VG_sample_size=self.VG_sample_size, 
+                                         VG_n_samples=self.VG_n_samples, weights=sample_weights)
+        
+        self.D_GGower = GGower_matrix.compute(X=X_sample)
+        self.sample_index = sample_index
+        self.out_sample_index = out_sample_index
+        self.X_sample = X_sample
+        self.X_out_sample = X_out_sample
+
+################################################################################
 
 class RelMSDistMatrix: 
     """
