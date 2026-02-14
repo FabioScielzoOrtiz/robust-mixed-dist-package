@@ -542,7 +542,7 @@ def delvin_algorithm(M, epsilon, n_iters):
 
 ################################################################################
 
-def S_robust(X, method, epsilon, n_iters, alpha=None, weights=None):
+def S_robust(X, method, alpha, epsilon=0.05, n_iters=20, weights=None):
     """
     Computes the robust covariance of the data matrix `X` by different methods.
 
