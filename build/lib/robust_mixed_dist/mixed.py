@@ -3,7 +3,9 @@
 import numpy as np
 import warnings
 from scipy.sparse.linalg import eigsh
+from scipy.linalg import eigvalsh
 from scipy.linalg import eigh
+from sklearn.utils.extmath import randomized_svd
 
 from robust_mixed_dist.quantitative import (
     euclidean_dist_matrix, 
@@ -241,7 +243,6 @@ def compute_dist_matrices(
 
     return D1, D2, D3
 
-
 ################################################################################
 
 def ensure_flat_array(x):
@@ -430,7 +431,7 @@ def generalized_gower_dist_matrix(
         d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
         d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
         q: the parameter that defines the Minkowski distance. Must be a positive integer.
-        metrobust_methodhod: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
+        robust_method: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
         alpha : a real number in [0,1] that is used if `robust_method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
         epsilon : parameter used by the Delvin transformation. epsilon=0.05 is recommended. Only needed when d1 = 'robust_mahalanobis'.
         n_iter : maximum number of iterations run by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
@@ -476,7 +477,20 @@ def generalized_gower_dist_matrix(
 
 def generalized_gower_dist(xi, xr, p1, p2, p3, d1, d2, d3, q=1, S=None, geom_var_1=None, geom_var_2=None, geom_var_3=None):
     """
-    xi, xr: a pair of mixed data vectors. They represent a couple of statistical observations.
+    Calculates the Generalized Gower distance between a pair of mixed data vectors.
+    
+    Parameters:
+        xi, xr: 1D array-like. They represent a couple of statistical observations (mixed data vectors).
+        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data vectors, respectively. Must be a non negative integer.
+        d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
+        d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
+        d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
+        q: the parameter that defines the Minkowski distance. Must be a positive integer.
+        S: the covariance matrix (standard or robust) to be used. Only needed when d1 is 'mahalanobis' or 'robust_mahalanobis'.
+        geom_var_1, geom_var_2, geom_var_3: geometric variability of the quantitative, binary, and multi-class distances, respectively. Used to standardize the squared distances.
+    
+    Returns:
+        dist: the Generalized Gower distance between the observations `xi` and `xr`.
     """
    
     dist1, dist2, dist3 = compute_distances(xi=xi, xr=xr, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3, q=q, S=S)
@@ -544,14 +558,20 @@ def compute_gram_matrix_faster(dist):
 ################################################################################
 
 def check_gram_matrix_psd(gram_matrix, atol=1e-15):
-    # OPTIMIZATION: Check for negative eigenvalues efficiently
-    # We first try to find just the smallest eigenvalue (SA = Smallest Algebraic)
+    """
+    Checks if a Gram matrix is Positive Semi-Definite (PSD).
+    Optimized for stability and speed using LAPACK symmetric routines.
+    """
     try:
-        # Use eigsh to find only 1 smallest eigenvalue. Much faster than full eig.
-        eig_min_val = eigsh(gram_matrix, k=1, which='SA', return_eigenvectors=False)[0]
+        # subset_by_index=[0, 0] calcula SOLO el 1er autovalor (el más pequeño)
+        # Es determinista, exacto y no calcula autovectores.
+        eig_min_val = eigvalsh(gram_matrix, subset_by_index=[0, 0])[0]
+        
     except Exception:
-        # Fallback for very small matrices or convergence issues
-        eig_min_val = np.min(np.linalg.eigvals(gram_matrix))
+        # Fallback de máxima seguridad (calcula todos los autovalores simétricos)
+        # Usamos eigvalsh en lugar de np.linalg.eigvals porque es mucho más
+        # rápido al asumir que la matriz es simétrica.
+        eig_min_val = np.min(eigvalsh(gram_matrix))
 
     is_psd = eig_min_val >= -atol
 
@@ -618,36 +638,40 @@ def compute_gram_matrix_sqrt_faster(gram_matrix, n_components=30):
     # Compute Square Root of Gram Matrix: G^(1/2)
     n = len(gram_matrix)
     
-    # OPTIMIZATION: Use Truncated Eigendecomposition if n_components is set
+    # OPTIMIZATION: Use Truncated approximation if n_components is set
     # Condition: components are fewer than full rank, and matrix is large enough to justify overhead
     if n_components is not None and n_components < n - 1 and n > 100: 
-        # Efficient approximation using ARPACK (Lanczos algorithm)
-        # 'LA' = Largest Algebraic (most significant components)
+        # Efficient rank-k approximation using Randomized SVD.
+        # This avoids ARPACK (Lanczos) convergence issues on matrices with clustered eigenvalues.
         
-        # S_eigsh (k,) ~ S_svd (n,)
-        # Q_eigsh (n, k) ~ U_svd (n, n)
-        # Q.T_eigsh (k, n) ~ Vt_svd (n, n)
-        evals, evecs = eigsh(gram_matrix, k=n_components, which='LA') # S = evals, Q = evecs
+        # Sigma_rsvd (k,) ~ Sigma_svd (n,)
+        # U_rsvd (n, k) ~ U_svd (n, n)
+        # VT_rsvd (k, n) ~ Vt_svd (n, n)
+        U, Sigma, VT = randomized_svd(gram_matrix, n_components=n_components, random_state=42)
+        
+        # Extract pseudo-eigenvalues and pseudo-eigenvectors
+        # Clip negative values to handle numerical noise
+        evals = np.clip(Sigma, 0, None) 
+        evecs = U
+        
+        # Reconstruct sqrt(G) ~= U @ diag(sqrt(Sigma)) @ U.T 
+        # Since G is symmetric, U == V, so we can use U.T instead of VT
+        # Result dims: (n, k) @ (k, k) @ (k, n) -> (n, n) [Rank-k approximation]
+        gram_matrix_sqrt = evecs @ np.diag(np.sqrt(evals)) @ evecs.T 
+       
+    else:
+        # Fallback to full decomposition
+        # eigh is highly optimized for symmetric matrices (faster than full SVD)
+        
+        # S_eigh (n,) = S_svd (n,)
+        # Q_eigh (n, n) = U_svd (n, n)
+        # Q.T_eigh (n, n) = Vt_svd (n, n)
+        evals, evecs = eigh(gram_matrix) # Q = evecs, S = evals
         
         # Clip negative eigenvalues (numerical noise)
         evals = np.clip(evals, 0, None)
         
-        # Reconstruct sqrt(G) ~= Q @ diag(sqrt(S)) @ Q.T (where Q = U, Q.T = Vt, sicne G is symmetric)
-        # Result dims: (n, k) @ (k, k) @ (k, n) -> (n, n) [Rank-k approximation]
-        gram_matrix_sqrt = evecs @ np.diag(np.sqrt(evals)) @ evecs.T 
-        
-    else:
-        # Fallback to full decomposition
-        # eigh is optimized for symmetric matrices (faster than svd)
-        
-        # S_eigsh (k,) = S_svd (n,)
-        # Q_eigsh (n, k) = U_svd (n, n)
-        # Q.T_eigsh (k, n) = Vt_svd (n, n)
-        evals, evecs = eigh(gram_matrix) # Q = evecs, S = evals
-        
-        evals = np.clip(evals, 0, None)
-        
-        # Reconstruct sqrt(G) = Q @ diag(sqrt(S)) @ Q.T (where Q = U, Q.T = Vt, sicne G is symmetric)
+        # Reconstruct sqrt(G) = Q @ diag(sqrt(S)) @ Q.T (where Q = eigenvectors)
         # Result dims: (n, n) @ (n, n) @ (n, n) -> (n, n) [Exact reconstruction]
         gram_matrix_sqrt = evecs @ np.diag(np.sqrt(evals)) @ evecs.T
 
@@ -800,7 +824,7 @@ def related_metric_scaling_dist_matrix_faster(
         d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
         d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
         q: the parameter that defines the Minkowski distance. Must be a positive integer.
-        metrobust_methodhod: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
+        robust_method: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
         alpha : a real number in [0,1] that is used if `robust_method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
         epsilon : parameter used by the Delvin transformation. epsilon=0.05 is recommended. Only needed when d1 = 'robust_mahalanobis'.
         n_iter : maximum number of iterations run by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
