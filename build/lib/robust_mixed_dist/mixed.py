@@ -175,7 +175,8 @@ def geometric_variability(D_2, weights=None):
     
     n = D_2.shape[0]
     if weights is None:
-        return np.sum(D_2) / (2 * (n**2))
+        GV = np.sum(D_2) / (2 * (n**2))
+        return GV
 
     if weights.shape[0] != n:
             raise ValueError(f"Weights dimension ({weights.shape[0]}) does not match with D_2 dimension ({n}).")
@@ -187,7 +188,8 @@ def geometric_variability(D_2, weights=None):
              raise ValueError("Sum of weights cannot be zero.")
         weights = weights / sum_weights
 
-    return (weights @ D_2 @ weights) / 2.0
+    GV_w = (weights @ D_2 @ weights) / 2
+    return GV_w
 
 
 ################################################################################
@@ -911,7 +913,10 @@ def related_metric_scaling_dist_matrix_faster(
     return dist_final
 
 ################################################################################
+################################################################################
+################################################################################
 
+'''
 def related_metric_scaling_dist(
     xi, xr, 
     p1, p2, p3, d1, d2, d3, 
@@ -1020,9 +1025,8 @@ def related_metric_scaling_dist(
     dist_final = np.sqrt(dist_2_final)
 
     return dist_final
+'''
 
-################################################################################
-################################################################################
 ################################################################################
 
 '''
@@ -1651,11 +1655,11 @@ class RelMSDistMatrix:
         g = np.diag(G) 
         g =  np.reshape(g, (len(g), 1))  
         g_T = np.reshape(g, (1, len(g)))   
-        D_2_ = g @ ones_T + ones @ g_T - 2*G
-        D_2_[np.isclose(D_2_, 0, atol=tol)] = 0
-        D = np.sqrt(D_2_)
+        D_2_final = g @ ones_T + ones @ g_T - 2*G
+        D_2_final[np.isclose(D_2_final, 0, atol=tol)] = 0
+        D_final = np.sqrt(D_2_final)
  
-        return D    
+        return D_final    
 '''
 
 ################################################################################
