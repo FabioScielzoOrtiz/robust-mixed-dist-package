@@ -65,7 +65,7 @@ def get_dist_objects():
 
 ################################################################################
 
-def simple_gower_dist(xi, xr, X, p1, p2, p3) :
+def simple_gower_dist(xi, xr, range, p1, p2, p3) :
     """
     Compute method.
     
@@ -78,20 +78,20 @@ def simple_gower_dist(xi, xr, X, p1, p2, p3) :
         dist: the Simple Gower distance between the observations `xi` and `xr`.
     """    
 
-    if hasattr(X, "to_numpy"):
-        X = X.to_numpy()
+    #if hasattr(X, "to_numpy"):
+    #    X = X.to_numpy()
     xi = ensure_flat_array(xi)
     xr = ensure_flat_array(xr)
 
     dist_objects = get_dist_objects()
 
-    X_quant = X[:,0:p1]  
     xi_quant = xi[0:p1] ; xr_quant = xr[0:p1] ; 
     xi_bin = xi[(p1):(p1+p2)] ; xr_bin = xr[(p1):(p1+p2)]
     xi_multi = xi[(p1+p2):(p1+p2+p3)] ; xr_multi = xr[(p1+p2):(p1+p2+p3)]
-    R = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
 
-    dist1 = np.sum(np.abs(xi_quant - xr_quant)/R) if p1 > 0 else 0
+    range[range == 0] = 1  # evitar división por cero
+    
+    dist1 = np.sum(np.abs(xi_quant - xr_quant)/range) if p1 > 0 else 0
     dist2 = dist_objects['jaccard'](xi_bin, xr_bin) if p2 > 0 else 0
     dist3 = dist_objects['hamming'](xi_multi, xr_multi) if p3 > 0 else 0
     dist = dist1 + dist2 + dist3
@@ -129,9 +129,9 @@ def simple_gower_dist_matrix(X, p1, p2, p3):
 
     # Distancia cuantitativa: Manhattan normalizada por rango
     if p1 > 0:
-        R = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
-        R[R == 0] = 1  # evitar división por cero
-        X_quant_norm = X_quant / R
+        range = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
+        range[range == 0] = 1  # evitar división por cero
+        X_quant_norm = X_quant / range
         dist_quant = dist_matrix_objects['minkowski'](X_quant_norm, q=1)
         D += dist_quant
 
