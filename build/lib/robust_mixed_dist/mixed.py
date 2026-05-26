@@ -465,7 +465,7 @@ def generalized_gower_dist_matrix(
 
         dist_2 = dist**2
         geom_var = geometric_variability(dist_2, weights=weights)
-        dist_2_std = dist_2 / geom_var if geom_var > 1e-15 else dist_2 
+        dist_2_std = dist_2 / geom_var if geom_var > 1e-10 else dist_2 
         dist_2_std_sum += dist_2_std
     
     dist = np.sqrt(dist_2_std_sum)
@@ -502,7 +502,7 @@ def generalized_gower_dist(xi, xr, p1, p2, p3, d1, d2, d3, q=1, S=None, geom_var
     for dist, geom_var in zip([dist1, dist2, dist3], [geom_var_1, geom_var_2, geom_var_3]):
 
         dist_2 = dist**2 
-        dist_2_std = dist_2 / geom_var
+        dist_2_std = dist_2 / geom_var if geom_var > 1e-10 else dist_2 
         dist_2_std_sum += dist_2_std
 
     dist = np.sqrt(dist_2_std_sum)
@@ -559,7 +559,7 @@ def compute_gram_matrix_faster(dist):
 
 ################################################################################
 
-def check_gram_matrix_psd(gram_matrix, atol=1e-15):
+def check_gram_matrix_psd(gram_matrix, atol=1e-10):
     """
     Checks if a Gram matrix is Positive Semi-Definite (PSD).
     Optimized for stability and speed using LAPACK symmetric routines.
@@ -776,12 +776,12 @@ def related_metric_scaling_dist_matrix(
 
         dist_2 = dist**2
         geom_var = geometric_variability(dist_2)
-        dist_2_std = dist_2/geom_var if geom_var > 1e-15 else dist_2 
+        dist_2_std = dist_2/geom_var if geom_var > 1e-10 else dist_2 
         gram_matrix = compute_gram_matrix(dist_2_std, centering_matrix)
 
         if Gs_PSD_transformation == True :
             v = np.real(np.linalg.eigvals(gram_matrix))
-            v[np.isclose(v, 0, atol=1e-15)] = 0
+            v[np.isclose(v, 0, atol=1e-10)] = 0
             gram_matrix_psd = np.all(v >= 0)
             if not gram_matrix_psd:
                 warnings.warn(f'Gram matrix for d{i} is not PSD, a transformation to force it will be applied.')   
@@ -801,7 +801,7 @@ def related_metric_scaling_dist_matrix(
     g =  np.reshape(g, (len(g), 1))  
     g_T = np.reshape(g, (1, len(g)))   
     dist_2_final = g @ ones_T + ones @ g_T - 2*gram_matrix_final
-    dist_2_final[np.isclose(dist_2_final, 0, atol=1e-15)] = 0
+    dist_2_final[np.isclose(dist_2_final, 0, atol=1e-10)] = 0
     dist_final = np.sqrt(dist_2_final)
 
     if return_combined_distances:
@@ -959,7 +959,7 @@ def related_metric_scaling_dist(
     for i, (dist_val, g_var) in enumerate(zip(raw_distances, geom_vars)):
         
         # Handle missing data or zero variance gracefully
-        if dist_val is None or g_var is None or g_var < 1e-15:
+        if dist_val is None or g_var is None or g_var < 1e-10:
             # If a metric is missing/invalid, it contributes 0 to the geometric space
             gram_matrix_list.append(np.zeros((n, n)))
             gram_matrix_sqrt_list.append(np.zeros((n, n)))
@@ -1019,7 +1019,7 @@ def related_metric_scaling_dist(
     dist_2_final = g00 + g11 - 2 * g01
     
     # Numerical safety (clip negative zeros)
-    if dist_2_final < 1e-15:
+    if dist_2_final < 1e-10:
         return 0.0
         
     dist_final = np.sqrt(dist_2_final)
