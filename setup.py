@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="robust-mixed-dist",
-    version="0.1.22",
+    version="0.1.26",
     author="Fabio Scielzo Ortiz",
     author_email="fabio.scielzoortiz@gmail.com",
     description="Compute statistical robust distances for mixed data.",
@@ -18,6 +18,6 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    install_requires=['polars', 'numpy', 'pandas', 'scipy<=1.16.2'],
+    install_requires=['polars', 'numpy', 'pandas', 'scikit-learn', 'scipy<=1.16.2'],
     python_requires=">=3.7"
 )
