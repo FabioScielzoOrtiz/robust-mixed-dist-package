@@ -719,7 +719,9 @@ def compute_cross_product_sum_faster(matrices: list[np.ndarray]) -> np.ndarray:
     return cross_product_sum
 
 ################################################################################
-################################################################################
+
+VALID_D1 = ['euclidean', 'minkowski', 'pearson', 'canberra', 'mahalanobis', 'robust_mahalanobis']
+
 
 def _get_quantitative_blocks(X, p1, p2, p3):
     """
@@ -737,17 +739,17 @@ def _get_quantitative_blocks(X, p1, p2, p3):
         X_bin        : sub-matrix for binary variables   (n × p2), or None.
         X_multi      : sub-matrix for multi-class variables (n × p3), or None.
     """
- 
+
     if hasattr(X, "to_numpy"):
         X_arr = X.to_numpy()
+    else:
+        X_arr = X
 
     # Normalise p1 to a list
     if isinstance(p1, int):
         p1_blocks = [p1]
     else:
         p1_blocks = list(p1)
-
-    p1_total = sum(p1_blocks)
 
     # Column slicing
     col = 0
@@ -760,6 +762,50 @@ def _get_quantitative_blocks(X, p1, p2, p3):
     X_multi = X_arr[:, col + p2:col + p2 + p3] if p3 > 0 else None
 
     return quant_blocks, X_bin, X_multi
+
+
+def _normalize_d1_per_block(d1, k):
+    """
+    Normalises d1 into a list of length k (one distance per quantitative block).
+
+    Parameters:
+        d1 : str or list/tuple of str.
+             - If a single string, it is replicated across all k blocks.
+             - If a list/tuple, its length must equal k, and each element
+               must be a valid distance name.
+        k  : number of quantitative blocks.
+
+    Returns:
+        list of k strings, each one of VALID_D1.
+
+    Raises:
+        ValueError if a list/tuple is given with a length different from k,
+        or if any distance name is not recognised.
+    """
+    if isinstance(d1, str):
+        d1_list = [d1] * k
+    elif isinstance(d1, (list, tuple)):
+        if len(d1) != k:
+            raise ValueError(
+                f"d1 was given as a list of length {len(d1)}, but there are "
+                f"{k} quantitative block(s) defined by p1. Provide either a "
+                f"single string (applied to all blocks) or a list/tuple of "
+                f"length {k}."
+            )
+        d1_list = list(d1)
+    else:
+        raise TypeError(
+            f"d1 must be a str or a list/tuple of str, got {type(d1)}."
+        )
+
+    for i, d in enumerate(d1_list):
+        if d not in VALID_D1:
+            raise ValueError(
+                f"Invalid distance '{d}' for quantitative block {i + 1}. "
+                f"Must be one of {VALID_D1}."
+            )
+
+    return d1_list
 
 
 ################################################################################
@@ -779,17 +825,25 @@ def related_metric_scaling_dist_matrix(
              If a list is provided, RelMS is applied across all k+2 blocks.
         p2 : number of binary variables.
         p3 : number of multi-class variables.
-        d1 : distance for quantitative blocks. One of
-             ['euclidean', 'minkowski', 'canberra', 'mahalanobis',
-              'robust_mahalanobis']. Applied to every quantitative block.
+        d1 : distance for quantitative blocks. Either:
+             - a single string from ['euclidean', 'minkowski', 'canberra',
+               'pearson', 'mahalanobis', 'robust_mahalanobis'], applied to every
+               quantitative block, or
+             - a list/tuple of strings of the same length as the number of
+               quantitative blocks (i.e. len(p1) if p1 is a list), giving a
+               distance per block (e.g. block 1 -> 'euclidean', block 2 ->
+               'mahalanobis').
         d2 : distance for binary variables.    One of ['sokal', 'jaccard'].
         d3 : distance for multi-class variables. One of ['hamming'].
         q  : Minkowski parameter (positive int).
         robust_method : robust covariance method; used when d1='robust_mahalanobis'.
+                         Global across all blocks.
         alpha         : trimming/winsorising level; used when d1='robust_mahalanobis'.
+                         Global across all blocks.
         epsilon       : Delvin transformation parameter.
         n_iters       : max iterations for the Delvin algorithm.
         weights       : sample weights; used when d1='robust_mahalanobis'.
+                         Global across all blocks.
         Gs_PSD_transformation : whether to force PSD Gram matrices.
         return_combined_distances : if True, also return the individual distance
                                     matrices as a tuple.
@@ -804,18 +858,19 @@ def related_metric_scaling_dist_matrix(
     # ------------------------------------------------------------------ #
     quant_blocks, X_bin, X_multi = _get_quantitative_blocks(X, p1, p2, p3)
     k = len(quant_blocks)
+    d1_list = _normalize_d1_per_block(d1, k)
 
     dist_list = []  # will hold one distance matrix per block (k quant + bin + multi)
 
     # --- Quantitative blocks ---
-    for X_q in quant_blocks:
+    for X_q, d1_i in zip(quant_blocks, d1_list):
         n_q = X_q.shape[1]
         if n_q == 0:
             dist_list.append(np.zeros((X_q.shape[0], X_q.shape[0])))
             continue
         d, _, _ = compute_dist_matrices(
             X=X_q, p1=n_q, p2=0, p3=0,
-            d1=d1, d2=d2, d3=d3,
+            d1=d1_i, d2=d2, d3=d3,
             q=q, robust_method=robust_method, epsilon=epsilon,
             alpha=alpha, n_iters=n_iters, weights=weights
         )
@@ -825,9 +880,9 @@ def related_metric_scaling_dist_matrix(
     n_obs = (X_bin if X_bin is not None else X_multi).shape[0]
     if p2 > 0 and X_bin is not None:
         _, d_bin, _ = compute_dist_matrices(
-            X=np.hstack([np.zeros((n_obs, 1)), X_bin]),  # dummy quant col
-            p1=1, p2=p2, p3=0,
-            d1=d1, d2=d2, d3=d3,
+            X=X_bin,
+            p1=0, p2=p2, p3=0,
+            d1=d1_list[0], d2=d2, d3=d3,
             q=q, robust_method=robust_method, epsilon=epsilon,
             alpha=alpha, n_iters=n_iters, weights=weights
         )
@@ -838,9 +893,9 @@ def related_metric_scaling_dist_matrix(
     # --- Multi-class block ---
     if p3 > 0 and X_multi is not None:
         _, _, d_multi = compute_dist_matrices(
-            X=np.hstack([np.zeros((n_obs, 1)), X_multi]),  # dummy quant col
-            p1=1, p2=0, p3=p3,
-            d1=d1, d2=d2, d3=d3,
+            X=X_multi,
+            p1=0, p2=0, p3=p3,
+            d1=d1_list[0], d2=d2, d3=d3,
             q=q, robust_method=robust_method, epsilon=epsilon,
             alpha=alpha, n_iters=n_iters, weights=weights
         )
@@ -923,7 +978,8 @@ def related_metric_scaling_dist_matrix_faster(
     """
     Calculates a faster estimation of the Related Metric Scaling matrix.
 
-    Parameters: identical to related_metric_scaling_dist_matrix, plus:
+    Parameters: identical to related_metric_scaling_dist_matrix (including the
+    per-block d1 as str or list/tuple), plus:
         n_components : number of components for the truncated SVD used in the
                        faster Gram-matrix square-root approximation.
         atol         : numerical tolerance for zero-clamping.
@@ -934,17 +990,18 @@ def related_metric_scaling_dist_matrix_faster(
     # ------------------------------------------------------------------ #
     quant_blocks, X_bin, X_multi = _get_quantitative_blocks(X, p1, p2, p3)
     k = len(quant_blocks)
+    d1_list = _normalize_d1_per_block(d1, k)
 
     dist_list = []
 
-    for X_q in quant_blocks:
+    for X_q, d1_i in zip(quant_blocks, d1_list):
         n_q = X_q.shape[1]
         if n_q == 0:
             dist_list.append(np.zeros((X_q.shape[0], X_q.shape[0])))
             continue
         d, _, _ = compute_dist_matrices(
             X=X_q, p1=n_q, p2=0, p3=0,
-            d1=d1, d2=d2, d3=d3,
+            d1=d1_i, d2=d2, d3=d3,
             q=q, robust_method=robust_method, epsilon=epsilon,
             alpha=alpha, n_iters=n_iters, weights=weights
         )
@@ -954,9 +1011,9 @@ def related_metric_scaling_dist_matrix_faster(
 
     if p2 > 0 and X_bin is not None:
         _, d_bin, _ = compute_dist_matrices(
-            X=np.hstack([np.zeros((n_obs, 1)), X_bin]),
-            p1=1, p2=p2, p3=0,
-            d1=d1, d2=d2, d3=d3,
+            X=X_bin,
+            p1=0, p2=p2, p3=0,
+            d1=d1_list[0], d2=d2, d3=d3,
             q=q, robust_method=robust_method, epsilon=epsilon,
             alpha=alpha, n_iters=n_iters, weights=weights
         )
@@ -966,9 +1023,9 @@ def related_metric_scaling_dist_matrix_faster(
 
     if p3 > 0 and X_multi is not None:
         _, _, d_multi = compute_dist_matrices(
-            X=np.hstack([np.zeros((n_obs, 1)), X_multi]),
-            p1=1, p2=0, p3=p3,
-            d1=d1, d2=d2, d3=d3,
+            X=X_multi,
+            p1=0, p2=0, p3=p3,
+            d1=d1_list[0], d2=d2, d3=d3,
             q=q, robust_method=robust_method, epsilon=epsilon,
             alpha=alpha, n_iters=n_iters, weights=weights
         )
@@ -1035,199 +1092,4 @@ def related_metric_scaling_dist_matrix_faster(
         return dist_final, dist_list
     return dist_final
 
-################################################################################
-
-'''
-def related_metric_scaling_dist_matrix(
-        X, p1, p2, p3,d1, d2, d3, 
-        q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None,
-        Gs_PSD_transformation=True, return_combined_distances=False
-):
-    """
-    Calculates the Related Metric Scaling matrix for a data matrix.
-    
-    Parameters:
-        X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
-        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
-        d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
-        d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
-        d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
-        q: the parameter that defines the Minkowski distance. Must be a positive integer.
-        metrobust_methodhod: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
-        alpha : a real number in [0,1] that is used if `robust_method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
-        epsilon : parameter used by the Delvin transformation. epsilon=0.05 is recommended. Only needed when d1 = 'robust_mahalanobis'.
-        n_iter : maximum number of iterations run by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
-        weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
-        tol: a tolerance value to round the close-to-zero eigenvalues of the Gramm matrices.
-        Gs_PSD_trans: controls if a transformation is applied to enforce positive semi-definite Gramm matrices.
-        d: a parameter that controls the omega definition involved in the transformation mentioned above.    
-
-    Returns:
-        D: the Related Metric Scaling matrix for the data matrix `X`.
-    """
-
-    dist1, dist2, dist3 = compute_dist_matrices(
-        X=X, 
-        p1=p1, 
-        p2=p2, 
-        p3=p3, 
-        d1=d1, 
-        d2=d2, 
-        d3=d3, 
-        q=q, 
-        robust_method=robust_method, 
-        epsilon=epsilon, 
-        alpha=alpha, 
-        n_iters=n_iters, 
-        weights=weights)
-    
-    n = len(dist1)
-    ones = np.ones((n, 1)) 
-    ones_T = np.ones((1, n))
-    ones_matrix = np.ones((n, n))
-    identity_matrix = np.identity(n)
-    centering_matrix = identity_matrix - (1/n)*(ones @ ones_T)
-     
-    gram_matrix_list, gram_matrix_sqrt_list = [], []
-
-    for i, dist in enumerate([dist1, dist2, dist3], start=1):
-
-        dist_2 = dist**2
-        geom_var = geometric_variability(dist_2)
-        dist_2_std = dist_2/geom_var if geom_var > 1e-10 else dist_2 
-        gram_matrix = compute_gram_matrix(dist_2_std, centering_matrix)
-
-        if Gs_PSD_transformation == True :
-            v = np.real(np.linalg.eigvals(gram_matrix))
-            v[np.isclose(v, 0, atol=1e-10)] = 0
-            gram_matrix_psd = np.all(v >= 0)
-            if not gram_matrix_psd:
-                warnings.warn(f'Gram matrix for d{i} is not PSD, a transformation to force it will be applied.')   
-            omega = 2.5 * np.abs(np.min(v))  
-            dist_2_std  = dist_2_std + omega*ones_matrix - omega*identity_matrix
-            gram_matrix = -(1/2)*(centering_matrix @ dist_2_std @ centering_matrix)
-        
-        gram_matrix_sqrt = compute_gram_matrix_sqrt(gram_matrix)   
-
-        gram_matrix_list.append(gram_matrix)
-        gram_matrix_sqrt_list.append(gram_matrix_sqrt)
-            
-    gram_matrices_sum = sum(gram_matrix_list)
-    gram_matrices_sqrt_cross_product_sum = compute_cross_product_sum(sqrtG1=gram_matrix_sqrt_list[0], sqrtG2=gram_matrix_sqrt_list[1], sqrtG3=gram_matrix_sqrt_list[2]) 
-    gram_matrix_final = gram_matrices_sum - (1/3) * gram_matrices_sqrt_cross_product_sum
-    g = np.diag(gram_matrix_final) 
-    g =  np.reshape(g, (len(g), 1))  
-    g_T = np.reshape(g, (1, len(g)))   
-    dist_2_final = g @ ones_T + ones @ g_T - 2*gram_matrix_final
-    dist_2_final[np.isclose(dist_2_final, 0, atol=1e-10)] = 0
-    dist_final = np.sqrt(dist_2_final)
-
-    if return_combined_distances:
-        return dist_final, dist1, dist2, dist3
-    
-    return dist_final
-
-################################################################################
-
-def related_metric_scaling_dist_matrix_faster(
-        X, p1, p2, p3,d1, d2, d3, 
-        q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None,
-        Gs_PSD_transformation=True, n_components=10, atol=1e-7, return_combined_distances=False
-):
-    """
-    Calculates a faster estimation of the Related Metric Scaling matrix for a data matrix.
-    
-    Parameters:
-        X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
-        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
-        d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
-        d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
-        d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
-        q: the parameter that defines the Minkowski distance. Must be a positive integer.
-        robust_method: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
-        alpha : a real number in [0,1] that is used if `robust_method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
-        epsilon : parameter used by the Delvin transformation. epsilon=0.05 is recommended. Only needed when d1 = 'robust_mahalanobis'.
-        n_iter : maximum number of iterations run by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
-        weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
-        tol: a tolerance value to round the close-to-zero eigenvalues of the Gramm matrices.
-        Gs_PSD_trans: controls if a transformation is applied to enforce positive semi-definite Gramm matrices.
-        d: a parameter that controls the omega definition involved in the transformation mentioned above.    
-
-    Returns:
-        D: the Related Metric Scaling matrix for the data matrix `X`.
-    """
-    dist1, dist2, dist3 = compute_dist_matrices(
-        X=X, 
-        p1=p1, 
-        p2=p2, 
-        p3=p3, 
-        d1=d1, 
-        d2=d2, 
-        d3=d3, 
-        q=q, 
-        robust_method=robust_method, 
-        epsilon=epsilon, 
-        alpha=alpha, 
-        n_iters=n_iters, 
-        weights=weights)
-    
-    n = len(dist1)
-
-    # Pre-allocate accumulator for the sum of Gram matrices
-    gram_matrices_sum = np.zeros((n, n))
-    gram_matrix_list, gram_matrix_sqrt_list = [], []
-
-    for i, dist in enumerate([dist1, dist2, dist3], start=1):
-        
-        # Handle cases where a variable type is missing (empty distance matrix)
-        if np.sum(dist) == 0:
-            gram_matrix_sqrt_list.append(np.zeros((n, n)))
-            continue
-        
-        dist_2 = dist**2
-        geom_var = geometric_variability(dist_2)
-        dist_2_std = dist_2/geom_var if geom_var > atol else dist_2 
-
-        gram_matrix = compute_gram_matrix_faster(dist_2_std)
-
-        # PSD Check and Transformation
-        if Gs_PSD_transformation:
-            eig_min_val, is_psd = check_gram_matrix_psd(gram_matrix, atol)
-            if not is_psd:
-                warnings.warn(f'Gram matrix for d{i} is not PSD (min eig={eig_min_val:.2e}). Transformation applied.')
-                gram_matrix = gram_matrix_psd_transformation(dist_2_std, eig_min_val)
-         
-        gram_matrix_sqrt = compute_gram_matrix_sqrt_faster(gram_matrix, n_components)  
-        
-        gram_matrix_list.append(gram_matrix)
-        gram_matrix_sqrt_list.append(gram_matrix_sqrt)
-    
-    # Sum individual gram matrices sum(Gj for j=1,2,3)
-    gram_matrices_sum = sum(gram_matrix_list)
-    # Calculate cross-products sum using the optimized helper
-    # Formula: sum(Gi^1/2 Gj^1/2) for i!=j
-    gram_matrices_sqrt_cross_product_sum = compute_cross_product_sum_faster(gram_matrix_sqrt_list) 
-    # Final Gram Matrix Combination: G_relms = sum(G_k) - (1/m) * sum_{k!=l} ...
-    # m = 3 in this specific implementation context    
-    gram_matrix_final = gram_matrices_sum - (1/3) * gram_matrices_sqrt_cross_product_sum
-
-    # Recover Euclidean Distances from Final Gram Matrix
-    # Formula: D^2_ij = G_ii + G_jj - 2G_ij
-    g_diag = np.diag(gram_matrix_final)
-    
-    # Use broadcasting for O(n^2) reconstruction
-    dist_2_final = g_diag[:, None] + g_diag[None, :] - 2 * gram_matrix_final
-    
-    # Cleanup numerical noise
-    dist_2_final[np.abs(dist_2_final) < atol] = 0
-    dist_2_final = np.clip(dist_2_final, 0, None)
-    
-    # Recover de final distance matrix
-    dist_final = np.sqrt(dist_2_final)
-
-    if return_combined_distances:
-        return dist_final, dist1, dist2, dist3
-    
-    return dist_final
-'''
 ################################################################################
