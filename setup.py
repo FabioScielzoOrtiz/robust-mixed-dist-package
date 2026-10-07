@@ -5,13 +5,13 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="robust-mixed-dist",
-    version="0.1.27",
-    author="Fabio Scielzo Ortiz",
+    version="0.1.31",
+    author="Fabio Scielzo-Ortiz",
     author_email="fabio.scielzoortiz@gmail.com",
     description="Compute statistical robust distances for mixed data.",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/FabioScielzoOrtiz/robust_mixed_dist-package",  # add your project URL here
+    url="https://github.com/FabioScielzoOrtiz/robust_mixed_dist-package",  
     packages=find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",

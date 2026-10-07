@@ -6,6 +6,7 @@ from scipy.sparse.linalg import eigsh
 from scipy.linalg import eigvalsh
 from scipy.linalg import eigh
 from sklearn.utils.extmath import randomized_svd
+from numbers import Integral
 
 from robust_mixed_dist.quantitative import (
     euclidean_dist_matrix, 
@@ -65,7 +66,7 @@ def get_dist_objects():
 
 ################################################################################
 
-def simple_gower_dist(xi, xr, range, p1, p2, p3) :
+def simple_gower_dist(xi, xr, rng, p1, p2, p3) :
     """
     Compute method.
     
@@ -89,9 +90,9 @@ def simple_gower_dist(xi, xr, range, p1, p2, p3) :
     xi_bin = xi[(p1):(p1+p2)] ; xr_bin = xr[(p1):(p1+p2)]
     xi_multi = xi[(p1+p2):(p1+p2+p3)] ; xr_multi = xr[(p1+p2):(p1+p2+p3)]
 
-    range[range == 0] = 1  # evitar división por cero
+    rng[rng == 0] = 1  # evitar división por cero
     
-    dist1 = np.sum(np.abs(xi_quant - xr_quant)/range) if p1 > 0 else 0
+    dist1 = np.sum(np.abs(xi_quant - xr_quant)/rng) if p1 > 0 else 0
     dist2 = dist_objects['jaccard'](xi_bin, xr_bin) if p2 > 0 else 0
     dist3 = dist_objects['hamming'](xi_multi, xr_multi) if p3 > 0 else 0
     dist = dist1 + dist2 + dist3
@@ -129,9 +130,9 @@ def simple_gower_dist_matrix(X, p1, p2, p3):
 
     # Distancia cuantitativa: Manhattan normalizada por rango
     if p1 > 0:
-        range = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
-        range[range == 0] = 1  # evitar división por cero
-        X_quant_norm = X_quant / range
+        rng = np.max(X_quant, axis=0) - np.min(X_quant, axis=0)
+        rng[rng == 0] = 1  # evitar división por cero
+        X_quant_norm = X_quant / rng
         dist_quant = dist_matrix_objects['minkowski'](X_quant_norm, q=1)
         D += dist_quant
 
@@ -191,6 +192,187 @@ def geometric_variability(D_2, weights=None):
     GV_w = (weights @ D_2 @ weights) / 2
     return GV_w
 
+################################################################################
+
+VALID_D1 = ['euclidean', 'minkowski', 'pearson', 'canberra', 'mahalanobis', 'robust_mahalanobis']
+
+def _normalize_p1(p1):
+    """
+    Normalises p1 into a list of block sizes.
+    An integer is treated as a single quantitative block.
+    """
+    if isinstance(p1, Integral):
+        p1_list = [int(p1)]
+    elif isinstance(p1, (list, tuple, np.ndarray)):
+        p1_list = [int(s) for s in p1]
+    else:
+        raise TypeError(f"p1 must be an int or a list/tuple of ints, got {type(p1)}.")
+
+    if len(p1_list) == 0:
+        raise ValueError("p1 cannot be an empty list.")
+    if any(s < 0 for s in p1_list):
+        raise ValueError(f"All quantitative block sizes must be >= 0, got {p1_list}.")
+
+    return p1_list
+
+
+def _get_quantitative_blocks(X, p1, p2, p3):
+    """
+    Parses p1 (int or list) and returns a list of sub-arrays for each
+    quantitative block, plus the binary and multi-class sub-arrays.
+    Works both for data matrices (n, p) and for single observations (p,).
+
+    Returns:
+        quant_blocks : list of k arrays, one per quantitative block.
+        X_bin        : binary part, or None if p2 == 0.
+        X_multi      : multi-class part, or None if p3 == 0.
+    """
+    X_arr = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
+    p1_blocks = _normalize_p1(p1)
+
+    n_cols_required = sum(p1_blocks) + p2 + p3
+    if n_cols_required > X_arr.shape[-1]:
+        raise ValueError(
+            f"p1, p2, p3 require {n_cols_required} columns "
+            f"(p1={p1_blocks}, p2={p2}, p3={p3}), but X has {X_arr.shape[-1]}."
+        )
+
+    col = 0
+    quant_blocks = []
+    for size in p1_blocks:
+        quant_blocks.append(X_arr[..., col:col + size])
+        col += size
+
+    X_bin   = X_arr[..., col:col + p2]           if p2 > 0 else None
+    X_multi = X_arr[..., col + p2:col + p2 + p3] if p3 > 0 else None
+
+    return quant_blocks, X_bin, X_multi
+
+
+def _normalize_d1_per_block(d1, k):
+    """
+    Normalises d1 into a list of length k (one distance per quantitative block).
+
+    Parameters:
+        d1 : str or list/tuple of str.
+             - If a single string, it is replicated across all k blocks.
+             - If a list/tuple, its length must equal k, and each element
+               must be a valid distance name.
+        k  : number of quantitative blocks.
+
+    Returns:
+        list of k strings, each one of VALID_D1.
+
+    Raises:
+        ValueError if a list/tuple is given with a length different from k,
+        or if any distance name is not recognised.
+    """
+    if isinstance(d1, str):
+        d1_list = [d1] * k
+    elif isinstance(d1, (list, tuple)):
+        if len(d1) != k:
+            raise ValueError(
+                f"d1 was given as a list of length {len(d1)}, but there are "
+                f"{k} quantitative block(s) defined by p1. Provide either a "
+                f"single string (applied to all blocks) or a list/tuple of "
+                f"length {k}."
+            )
+        d1_list = list(d1)
+    else:
+        raise TypeError(
+            f"d1 must be a str or a list/tuple of str, got {type(d1)}."
+        )
+
+    for i, d in enumerate(d1_list):
+        if d not in VALID_D1:
+            raise ValueError(
+                f"Invalid distance '{d}' for quantitative block {i + 1}. "
+                f"Must be one of {VALID_D1}."
+            )
+
+    return d1_list
+
+def _normalize_per_block(param, k, name):
+    """
+    Normalises a per-block parameter into a list of length k.
+      - list/tuple -> its length must be k.
+      - anything else (scalar, None, np.ndarray) -> replicated k times.
+    Note: a covariance matrix must be passed as np.ndarray (not as a nested
+    list), otherwise it would be interpreted as a per-block list.
+    """
+    if isinstance(param, (list, tuple)):
+        if len(param) != k:
+            raise ValueError(
+                f"{name} was given as a list of length {len(param)}, but there are "
+                f"{k} quantitative block(s) defined by p1. Provide either a single "
+                f"value (applied to all blocks) or a list/tuple of length {k}."
+            )
+        return list(param)
+    return [param] * k
+
+
+################################################################################
+
+def compute_distances(xi, xr, p1, p2, p3, d1, d2, d3, q=1, S=None):
+    """
+    Calculates the per-block distances between two observations that are
+    involved in the Generalized Gower distance.
+
+    Parameters:
+        xi, xr : 1D array-like. A pair of mixed observations.
+        p1 : int or list of ints (quantitative block sizes).
+        p2, p3 : number of binary and multi-class variables.
+        d1 : str or list/tuple of str of length k.
+        d2, d3 : distances for binary and multi-class variables.
+        q  : int or list of ints of length k.
+        S  : covariance matrix (np.ndarray) if k == 1, or a list of length k
+             with one covariance matrix (or None) per block. Required for
+             blocks whose distance is 'mahalanobis' or 'robust_mahalanobis'
+             (see `compute_S_by_block`).
+
+    Returns:
+        tuple of k + 2 floats: (dist_q1, ..., dist_qk, dist_bin, dist_multi).
+    """
+    xi = ensure_flat_array(xi)
+    xr = ensure_flat_array(xr)
+
+    xi_q, xi_bin, xi_multi = _get_quantitative_blocks(xi, p1, p2, p3)
+    xr_q, xr_bin, xr_multi = _get_quantitative_blocks(xr, p1, p2, p3)
+    k = len(xi_q)
+    d1_list = _normalize_d1_per_block(d1, k)
+    q_list  = _normalize_per_block(q, k, 'q')
+    S_list  = _normalize_per_block(S, k, 'S')
+
+    dist_objects = get_dist_objects()
+    dist_list = []
+
+    for j, (a, b, d1_j, q_j, S_j) in enumerate(zip(xi_q, xr_q, d1_list, q_list, S_list), start=1):
+        if a.shape[0] == 0:
+            dist_list.append(0.0)
+            continue
+        if d1_j not in dist_objects:
+            raise NotImplementedError(
+                f"Distance '{d1_j}' (block {j}) has no point-to-point implementation."
+            )
+        if d1_j in ('mahalanobis', 'robust_mahalanobis') and S_j is None:
+            raise ValueError(
+                f"Quantitative block {j} uses '{d1_j}' and requires its covariance "
+                f"matrix in S (see compute_S_by_block)."
+            )
+
+        if d1_j == 'minkowski':
+            dist_list.append(dist_objects[d1_j](a, b, q=q_j))
+        elif d1_j == 'robust_mahalanobis':
+            dist_list.append(dist_objects[d1_j](a, b, S_robust=S_j))
+        elif d1_j == 'mahalanobis':
+            dist_list.append(dist_objects[d1_j](a, b, S=S_j))
+        else:
+            dist_list.append(dist_objects[d1_j](a, b))
+
+    dist_list.append(dist_objects[d2](xi_bin, xr_bin)     if p2 > 0 else 0.0)
+    dist_list.append(dist_objects[d3](xi_multi, xr_multi) if p3 > 0 else 0.0)
+
+    return tuple(dist_list)
 
 ################################################################################
 
@@ -247,6 +429,88 @@ def compute_dist_matrices(
 
 ################################################################################
 
+def compute_dist_matrices_by_block(
+        X, p1, p2, p3, d1, d2, d3,
+        q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None
+):
+    """
+    Computes one distance matrix per block: k quantitative blocks (defined by p1),
+    plus the binary block and the multi-class block.
+
+    Parameters:
+        X  : pandas/polars DataFrame or numpy array of shape (n, sum(p1) + p2 + p3).
+        p1 : int or list of ints (block sizes).
+        p2, p3 : number of binary and multi-class variables.
+        d1 : str or list/tuple of str of length k (distance per quantitative block).
+        d2, d3 : distances for binary and multi-class variables.
+        q  : int or list of ints of length k (Minkowski parameter per block).
+        robust_method, epsilon, alpha, n_iters, weights : robust covariance
+            parameters, global across blocks (used when a block uses 'robust_mahalanobis').
+
+    Returns:
+        dist_list : list of k + 2 (n x n) arrays [D_q1, ..., D_qk, D_bin, D_multi].
+                    Absent blocks (0 columns, p2 = 0, p3 = 0) are zero matrices.
+    """
+    quant_blocks, X_bin, X_multi = _get_quantitative_blocks(X, p1, p2, p3)
+    k = len(quant_blocks)
+    d1_list = _normalize_d1_per_block(d1, k)
+    q_list  = _normalize_per_block(q, k, 'q')
+    n = quant_blocks[0].shape[0]   # always exists, even with 0 columns
+
+    dist_matrix_objects = get_dist_matrix_objects()
+    dist_list = []
+
+    for X_q, d1_i, q_i in zip(quant_blocks, d1_list, q_list):
+        if X_q.shape[1] == 0:
+            dist_list.append(np.zeros((n, n)))
+            continue
+        D_q, _, _ = compute_dist_matrices(
+            X=X_q, p1=X_q.shape[1], p2=0, p3=0, d1=d1_i, d2=d2, d3=d3,
+            q=q_i, robust_method=robust_method, epsilon=epsilon,
+            alpha=alpha, n_iters=n_iters, weights=weights
+        )
+        dist_list.append(D_q)
+
+    dist_list.append(dist_matrix_objects[d2](X_bin)   if p2 > 0 else np.zeros((n, n)))
+    dist_list.append(dist_matrix_objects[d3](X_multi) if p3 > 0 else np.zeros((n, n)))
+
+    return dist_list
+
+################################################################################
+
+def compute_S_by_block(
+        X, p1, p2, p3, d1,
+        robust_method='trimmed', alpha=0.05, epsilon=0.05, n_iters=20, weights=None
+):
+    """
+    Computes the covariance matrix required by each quantitative block.
+
+    Returns:
+        S_list : list of length k. Element j is
+                 - the robust covariance matrix if d1[j] == 'robust_mahalanobis',
+                 - the classical covariance matrix if d1[j] == 'mahalanobis',
+                 - None otherwise (or if the block has 0 columns).
+                 Can be passed directly as `S` to `generalized_gower_dist`.
+    """
+    quant_blocks, _, _ = _get_quantitative_blocks(X, p1, p2, p3)
+    d1_list = _normalize_d1_per_block(d1, len(quant_blocks))
+
+    S_list = []
+    for X_q, d in zip(quant_blocks, d1_list):
+        if X_q.shape[1] == 0:
+            S_list.append(None)
+        elif d == 'robust_mahalanobis':
+            S_list.append(S_robust(X=X_q, method=robust_method, alpha=alpha,
+                                   epsilon=epsilon, n_iters=n_iters, weights=weights))
+        elif d == 'mahalanobis':
+            S_list.append(np.atleast_2d(np.cov(X_q, rowvar=False)))
+        else:
+            S_list.append(None)
+
+    return S_list
+
+################################################################################
+
 def ensure_flat_array(x):
     """
     Converts input (DataFrame, Series, List, etc.) to a flattened 1D NumPy array.
@@ -274,49 +538,64 @@ def ensure_flat_array(x):
 
 def compute_distances(xi, xr, p1, p2, p3, d1, d2, d3, q=1, S=None):
     """
-    Calculates the distances between observations that are involved in the Generalized Gower distance.
-       
-    Parameters:
-        xi, xr: a pair of quantitative vectors. They represent a couple of statistical observations.
-        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
-        d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
-        d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
-        d3: name of the distance to be computed for multi-class variables. Must be an string in ['matching'].
-        q: the parameter that defines the Minkowski distance. Must be a positive integer.
-        S: the covariance matrix of the considered data matrix.
-        S_robust: the robust covariance matrix of the considered data matrix.
-                  
-    Returns:
-        dist1, dist2, dist3: the distances values associated to the quantitative, binary and multi-class observations, respectively.
-    """
+    Calculates the per-block distances between two observations that are
+    involved in the Generalized Gower distance.
 
+    Parameters:
+        xi, xr : 1D array-like. A pair of mixed observations.
+        p1 : int or list of ints (quantitative block sizes).
+        p2, p3 : number of binary and multi-class variables.
+        d1 : str or list/tuple of str of length k.
+        d2, d3 : distances for binary and multi-class variables.
+        q  : int or list of ints of length k.
+        S  : covariance matrix (np.ndarray) if k == 1, or a list of length k
+             with one covariance matrix (or None) per block. Required for
+             blocks whose distance is 'mahalanobis' or 'robust_mahalanobis'
+             (see `compute_S_by_block`).
+
+    Returns:
+        tuple of k + 2 floats: (dist_q1, ..., dist_qk, dist_bin, dist_multi).
+    """
     xi = ensure_flat_array(xi)
     xr = ensure_flat_array(xr)
 
+    xi_q, xi_bin, xi_multi = _get_quantitative_blocks(xi, p1, p2, p3)
+    xr_q, xr_bin, xr_multi = _get_quantitative_blocks(xr, p1, p2, p3)
+    k = len(xi_q)
+    d1_list = _normalize_d1_per_block(d1, k)
+    q_list  = _normalize_per_block(q, k, 'q')
+    S_list  = _normalize_per_block(S, k, 'S')
+
     dist_objects = get_dist_objects()
-                   
-    xi_quant = xi[0:p1]  
-    xr_quant = xr[0:p1] 
-    xi_bin = xi[(p1):(p1+p2)] 
-    xr_bin = xr[(p1):(p1+p2)]
-    xi_multi = xi[(p1+p2):(p1+p2+p3)] 
-    xr_multi = xr[(p1+p2):(p1+p2+p3)]
-    
-    dist1 = 0
-    if p1 > 0:
-        if d1 == 'minkowski':
-            dist1 = dist_objects[d1](xi_quant, xr_quant, q=q)
-        elif d1 == 'robust_mahalanobis':
-            dist1 = dist_objects[d1](xi_quant, xr_quant, S_robust=S)
-        elif d1 == 'mahalanobis':
-            dist1 = dist_objects[d1](xi_quant, xr_quant, S=S)
+    dist_list = []
+
+    for j, (a, b, d1_j, q_j, S_j) in enumerate(zip(xi_q, xr_q, d1_list, q_list, S_list), start=1):
+        if a.shape[0] == 0:
+            dist_list.append(0.0)
+            continue
+        if d1_j not in dist_objects:
+            raise NotImplementedError(
+                f"Distance '{d1_j}' (block {j}) has no point-to-point implementation."
+            )
+        if d1_j in ('mahalanobis', 'robust_mahalanobis') and S_j is None:
+            raise ValueError(
+                f"Quantitative block {j} uses '{d1_j}' and requires its covariance "
+                f"matrix in S (see compute_S_by_block)."
+            )
+
+        if d1_j == 'minkowski':
+            dist_list.append(dist_objects[d1_j](a, b, q=q_j))
+        elif d1_j == 'robust_mahalanobis':
+            dist_list.append(dist_objects[d1_j](a, b, S_robust=S_j))
+        elif d1_j == 'mahalanobis':
+            dist_list.append(dist_objects[d1_j](a, b, S=S_j))
         else:
-            dist1 = dist_objects[d1](xi_quant, xr_quant)
+            dist_list.append(dist_objects[d1_j](a, b))
 
-    dist2 = dist_objects[d2](xi_bin, xr_bin) if p2 > 0 else 0
-    dist3 = dist_objects[d3](xi_multi, xr_multi) if p3 > 0 else 0
+    dist_list.append(dist_objects[d2](xi_bin, xr_bin)     if p2 > 0 else 0.0)
+    dist_list.append(dist_objects[d3](xi_multi, xr_multi) if p3 > 0 else 0.0)
 
-    return dist1, dist2, dist3
+    return tuple(dist_list)
     
 ################################################################################
 
@@ -340,81 +619,15 @@ def compute_geometric_var(
         weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
             
     Returns:
-        VG1, VG2, VG3: the geometric variabilities of the distances matrices associated to the quantitative, binary and multi-class variables, respectively.
+        Tuple of k + 2 geometric variabilities, in the same order as the blocks (k quantitative, binary, multi-class). For an integer p1 this is (VG1, VG2, VG3).
     """
 
-    D1, D2, D3 = compute_dist_matrices(
+    dist_list = compute_dist_matrices_by_block(
         X=X, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3,
         q=q, robust_method=robust_method, epsilon=epsilon,
         alpha=alpha, n_iters=n_iters, weights=weights
     )
-       
-    D1_2, D2_2, D3_2 = D1**2, D2**2, D3**2
-    VG1, VG2, VG3 = geometric_variability(D1_2, weights), geometric_variability(D2_2, weights), geometric_variability(D3_2, weights)
-
-    return VG1, VG2, VG3
-
-################################################################################
-
-'''
-class GGowerDistMatrix: 
-    """
-    Calculates the Generalized Gower matrix for a data matrix.
-    """
-
-    def __init__(self, p1, p2, p3, d1='euclidean', d2='sokal', d3='matching', q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20, weights=None):
-        """
-        Constructor method.
-        
-        Parameters:
-            p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
-            d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
-            d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
-            d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
-            q: the parameter that defines the Minkowski distance. Must be a positive integer.
-            metrobust_methodhod: the robust_method to be used for computing the robust covariance matrix. Only needed when d1 = 'robust_mahalanobis'.
-            alpha : a real number in [0,1] that is used if `robust_method` is 'trimmed' or 'winsorized'. Only needed when d1 = 'robust_mahalanobis'.
-            epsilon : parameter used by the Delvin transformation. epsilon=0.05 is recommended. Only needed when d1 = 'robust_mahalanobis'.
-            n_iter : maximum number of iterations run by the Delvin algorithm. Only needed when d1 = 'robust_mahalanobis'.
-            weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
-            fast_VG: whether the geometric variability estimation will be full (False) or fast (True).
-            VG_sample_size: sample size to be used to make the estimation of the geometric variability.
-            VG_n_samples: number of samples to be used to make the estimation of the geometric variability.
-            random_state: the random seed used for the (random) sample elements.
-        """
-        self.p1 = p1 ; self.p2 = p2 ; self.p3 = p3
-        self.d1 = d1 ; self.d2 = d2 ; self.d3 = d3
-        self.q = q ; self.robust_method = robust_method ; self.alpha = alpha ; 
-        self.epsilon = epsilon ; self.n_iters = n_iters; self.weights = weights
-
-    def compute(self, X):
-        """
-        Compute method.
-        
-        Parameters:
-            X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
-            
-        Returns:
-            D: the Generalized Gower matrix for the data matrix `X`.
-        """
-
-        D1, D2, D3 = compute_dist_matrices(X=X, p1=self.p1, p2=self.p2, p3=self.p3, 
-                                               d1=self.d1, d2=self.d2, d3=self.d3, 
-                                               q=self.q, robust_method=self.robust_method, epsilon=self.epsilon, 
-                                               alpha=self.alpha, n_iters=self.n_iters, weights=self.weights)
-
-        D1_2 = D1**2  ; D2_2 = D2**2 ; D3_2 = D3**2
-
-        VG1, VG2, VG3 = geometric_variability(D1_2, self.weights), geometric_variability(D2_2, self.weights), geometric_variability(D3_2, self.weights)
-
-        D1_std = D1_2/VG1 if VG1 > 0 else D1_2 
-        D2_std = D2_2/VG2 if VG2 > 0 else D2_2 
-        D3_std = D3_2/VG3 if VG3 > 0 else D3_2
-        D_2 = D1_std + D2_std + D3_std
-        D = np.sqrt(D_2)
-
-        return D 
-'''
+    return tuple(geometric_variability(D ** 2, weights) for D in dist_list)
 
 ################################################################################
 
@@ -428,8 +641,18 @@ def generalized_gower_dist_matrix(
     
     Parameters:
         X: a pandas/polars data-frame or a numpy array. Represents a data matrix.
-        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
-        d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
+        p1 : int or list of ints. Number of quantitative variables (single block)
+             or list [p1_1, ..., p1_k] defining k quantitative blocks.
+             If a list is provided, GGower is applied across all k+2 blocks.
+        p2, p3: number of binary and multi-class variables in the considered data matrix, respectively. Must be a non negative integer.
+        d1 : distance for quantitative blocks. Either:
+             - a single string from ['euclidean', 'minkowski', 'canberra',
+               'pearson', 'mahalanobis', 'robust_mahalanobis'], applied to every
+               quantitative block, or
+             - a list/tuple of strings of the same length as the number of
+               quantitative blocks (i.e. len(p1) if p1 is a list), giving a
+               distance per block (e.g. block 1 -> 'euclidean', block 2 ->
+               'mahalanobis').
         d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
         d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
         q: the parameter that defines the Minkowski distance. Must be a positive integer.
@@ -440,74 +663,77 @@ def generalized_gower_dist_matrix(
         weights: the sample weights. Only used if provided and d1 = 'robust_mahalanobis'.  
     
     Returns:
-        D: the Generalized Gower matrix for the data matrix `X`.
+        dist : (n x n) Generalized Gower distance matrix.
+        dist_list : only if return_combined_distances=True. List of k + 2
+                    (n x n) matrices [D_q1, ..., D_qk, D_bin, D_multi]
+                    (non-standardised, non-squared).
     """
-    dist1, dist2, dist3 = compute_dist_matrices(
-        X=X, 
-        p1=p1, 
-        p2=p2, 
-        p3=p3, 
-        d1=d1, 
-        d2=d2, 
-        d3=d3, 
-        q=q, 
-        robust_method=robust_method, 
-        epsilon=epsilon, 
-        alpha=alpha, 
-        n_iters=n_iters, 
-        weights=weights
+    dist_list = compute_dist_matrices_by_block(
+        X=X, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3,
+        q=q, robust_method=robust_method, epsilon=epsilon,
+        alpha=alpha, n_iters=n_iters, weights=weights
     )
-    
-    n = len(dist1)
+
+    n = dist_list[0].shape[0]
     dist_2_std_sum = np.zeros((n, n))
 
-    for dist in [dist1, dist2, dist3]:
+    for D in dist_list:
+        D_2 = D ** 2
+        geom_var = geometric_variability(D_2, weights=weights)
+        dist_2_std_sum += D_2 / geom_var if geom_var > 1e-10 else D_2
 
-        dist_2 = dist**2
-        geom_var = geometric_variability(dist_2, weights=weights)
-        dist_2_std = dist_2 / geom_var if geom_var > 1e-10 else dist_2 
-        dist_2_std_sum += dist_2_std
-    
     dist = np.sqrt(dist_2_std_sum)
 
     if return_combined_distances:
-        return dist, dist1, dist2, dist3
-
-    return dist 
+        return dist, dist_list
+    return dist
 
 ################################################################################
 
-def generalized_gower_dist(xi, xr, p1, p2, p3, d1, d2, d3, q=1, S=None, geom_var_1=None, geom_var_2=None, geom_var_3=None):
+def generalized_gower_dist(
+        xi, xr, p1, p2, p3, d1, d2, d3, q=1, S=None,
+        geom_vars=None, geom_var_1=None, geom_var_2=None, geom_var_3=None
+):
     """
-    Calculates the Generalized Gower distance between a pair of mixed data vectors.
-    
+    Calculates the Generalized Gower distance between a pair of mixed observations.
+
     Parameters:
-        xi, xr: 1D array-like. They represent a couple of statistical observations (mixed data vectors).
-        p1, p2, p3: number of quantitative, binary and multi-class variables in the considered data vectors, respectively. Must be a non negative integer.
-        d1: name of the distance to be computed for quantitative variables. Must be an string in ['euclidean', 'minkowski', 'canberra', 'mahalanobis', 'robust_mahalanobis']. 
-        d2: name of the distance to be computed for binary variables. Must be an string in ['sokal', 'jaccard'].
-        d3: name of the distance to be computed for multi-class variables. Must be an string in ['hamming'].
-        q: the parameter that defines the Minkowski distance. Must be a positive integer.
-        S: the covariance matrix (standard or robust) to be used. Only needed when d1 is 'mahalanobis' or 'robust_mahalanobis'.
-        geom_var_1, geom_var_2, geom_var_3: geometric variability of the quantitative, binary, and multi-class distances, respectively. Used to standardize the squared distances.
-    
+        ... (p1 / d1 / q como en la versión matricial) ...
+        S : covariance matrix (k == 1) or list of k covariance matrices / None
+            (see compute_S_by_block).
+        geom_vars : sequence of k + 2 geometric variabilities, in block order
+                    (e.g. the output of compute_geometric_var).
+        geom_var_1, geom_var_2, geom_var_3 : legacy arguments, only valid when
+                    p1 defines a single quantitative block. Ignored if geom_vars
+                    is given.
+        A geometric variability equal to None (or <= 1e-10) means that block
+        is not standardised.
+
     Returns:
-        dist: the Generalized Gower distance between the observations `xi` and `xr`.
+        dist : the Generalized Gower distance between `xi` and `xr`.
     """
-   
-    dist1, dist2, dist3 = compute_distances(xi=xi, xr=xr, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3, q=q, S=S)
-    
-    dist_2_std_sum = 0
+    dist_list = compute_distances(
+        xi=xi, xr=xr, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3, q=q, S=S
+    )
+    m = len(dist_list)
 
-    for dist, geom_var in zip([dist1, dist2, dist3], [geom_var_1, geom_var_2, geom_var_3]):
+    if geom_vars is None:
+        if m != 3:
+            raise ValueError(
+                f"p1 defines {m - 2} quantitative blocks: pass `geom_vars` as a "
+                f"sequence of length {m} (e.g. the output of compute_geometric_var)."
+            )
+        geom_vars = (geom_var_1, geom_var_2, geom_var_3)
+    elif len(geom_vars) != m:
+        raise ValueError(f"geom_vars has length {len(geom_vars)}, expected {m}.")
 
-        dist_2 = dist**2 
-        dist_2_std = dist_2 / geom_var if geom_var > 1e-10 else dist_2 
-        dist_2_std_sum += dist_2_std
+    dist_2_std_sum = 0.0
+    for d, gv in zip(dist_list, geom_vars):
+        d_2 = d ** 2
+        dist_2_std_sum += d_2 / gv if (gv is not None and gv > 1e-10) else d_2
 
-    dist = np.sqrt(dist_2_std_sum)
+    return np.sqrt(dist_2_std_sum)
 
-    return dist
 
 ################################################################################
 
@@ -720,96 +946,6 @@ def compute_cross_product_sum_faster(matrices: list[np.ndarray]) -> np.ndarray:
 
 ################################################################################
 
-VALID_D1 = ['euclidean', 'minkowski', 'pearson', 'canberra', 'mahalanobis', 'robust_mahalanobis']
-
-
-def _get_quantitative_blocks(X, p1, p2, p3):
-    """
-    Parses p1 (int or list) and returns a list of sub-matrices for each
-    quantitative block, plus the binary and multi-class sub-matrices.
-
-    Parameters:
-        X  : array-like of shape (n, p1_total + p2 + p3)
-        p1 : int or list of ints. If int, treated as a single block.
-        p2 : number of binary variables.
-        p3 : number of multi-class variables.
-
-    Returns:
-        quant_blocks : list of k numpy arrays, one per quantitative block.
-        X_bin        : sub-matrix for binary variables   (n × p2), or None.
-        X_multi      : sub-matrix for multi-class variables (n × p3), or None.
-    """
-
-    if hasattr(X, "to_numpy"):
-        X_arr = X.to_numpy()
-    else:
-        X_arr = X
-
-    # Normalise p1 to a list
-    if isinstance(p1, int):
-        p1_blocks = [p1]
-    else:
-        p1_blocks = list(p1)
-
-    # Column slicing
-    col = 0
-    quant_blocks = []
-    for size in p1_blocks:
-        quant_blocks.append(X_arr[:, col:col + size])
-        col += size
-
-    X_bin   = X_arr[:, col:col + p2]   if p2 > 0 else None
-    X_multi = X_arr[:, col + p2:col + p2 + p3] if p3 > 0 else None
-
-    return quant_blocks, X_bin, X_multi
-
-
-def _normalize_d1_per_block(d1, k):
-    """
-    Normalises d1 into a list of length k (one distance per quantitative block).
-
-    Parameters:
-        d1 : str or list/tuple of str.
-             - If a single string, it is replicated across all k blocks.
-             - If a list/tuple, its length must equal k, and each element
-               must be a valid distance name.
-        k  : number of quantitative blocks.
-
-    Returns:
-        list of k strings, each one of VALID_D1.
-
-    Raises:
-        ValueError if a list/tuple is given with a length different from k,
-        or if any distance name is not recognised.
-    """
-    if isinstance(d1, str):
-        d1_list = [d1] * k
-    elif isinstance(d1, (list, tuple)):
-        if len(d1) != k:
-            raise ValueError(
-                f"d1 was given as a list of length {len(d1)}, but there are "
-                f"{k} quantitative block(s) defined by p1. Provide either a "
-                f"single string (applied to all blocks) or a list/tuple of "
-                f"length {k}."
-            )
-        d1_list = list(d1)
-    else:
-        raise TypeError(
-            f"d1 must be a str or a list/tuple of str, got {type(d1)}."
-        )
-
-    for i, d in enumerate(d1_list):
-        if d not in VALID_D1:
-            raise ValueError(
-                f"Invalid distance '{d}' for quantitative block {i + 1}. "
-                f"Must be one of {VALID_D1}."
-            )
-
-    return d1_list
-
-
-################################################################################
-
 def related_metric_scaling_dist_matrix(
         X, p1, p2, p3, d1, d2, d3,
         q=1, robust_method='trimmed', epsilon=0.05, alpha=0.05, n_iters=20,
@@ -849,62 +985,24 @@ def related_metric_scaling_dist_matrix(
                                     matrices as a tuple.
 
     Returns:
-        dist_final : (n × n) RelMS distance matrix.
-        (optional) individual distance matrices when return_combined_distances=True.
+        dist : (n x n) Generalized Gower distance matrix.
+        dist_list : only if return_combined_distances=True. List of k + 2
+                    (n x n) matrices [D_q1, ..., D_qk, D_bin, D_multi]
+                    (non-standardised, non-squared).
     """
 
     # ------------------------------------------------------------------ #
-    # 1. Parse blocks and build per-block distance matrices                #
+    # 1. Build per-block distance matrices                               #
     # ------------------------------------------------------------------ #
-    quant_blocks, X_bin, X_multi = _get_quantitative_blocks(X, p1, p2, p3)
-    k = len(quant_blocks)
-    d1_list = _normalize_d1_per_block(d1, k)
 
-    dist_list = []  # will hold one distance matrix per block (k quant + bin + multi)
-
-    # --- Quantitative blocks ---
-    for X_q, d1_i in zip(quant_blocks, d1_list):
-        n_q = X_q.shape[1]
-        if n_q == 0:
-            dist_list.append(np.zeros((X_q.shape[0], X_q.shape[0])))
-            continue
-        d, _, _ = compute_dist_matrices(
-            X=X_q, p1=n_q, p2=0, p3=0,
-            d1=d1_i, d2=d2, d3=d3,
-            q=q, robust_method=robust_method, epsilon=epsilon,
-            alpha=alpha, n_iters=n_iters, weights=weights
-        )
-        dist_list.append(d)
-
-    # --- Binary block ---
-    n_obs = (X_bin if X_bin is not None else X_multi).shape[0]
-    if p2 > 0 and X_bin is not None:
-        _, d_bin, _ = compute_dist_matrices(
-            X=X_bin,
-            p1=0, p2=p2, p3=0,
-            d1=d1_list[0], d2=d2, d3=d3,
-            q=q, robust_method=robust_method, epsilon=epsilon,
-            alpha=alpha, n_iters=n_iters, weights=weights
-        )
-        dist_list.append(d_bin)
-    else:
-        dist_list.append(np.zeros((n_obs, n_obs)))
-
-    # --- Multi-class block ---
-    if p3 > 0 and X_multi is not None:
-        _, _, d_multi = compute_dist_matrices(
-            X=X_multi,
-            p1=0, p2=0, p3=p3,
-            d1=d1_list[0], d2=d2, d3=d3,
-            q=q, robust_method=robust_method, epsilon=epsilon,
-            alpha=alpha, n_iters=n_iters, weights=weights
-        )
-        dist_list.append(d_multi)
-    else:
-        dist_list.append(np.zeros((n_obs, n_obs)))
+    dist_list = compute_dist_matrices_by_block(
+        X=X, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3,
+        q=q, robust_method=robust_method, epsilon=epsilon,
+        alpha=alpha, n_iters=n_iters, weights=weights
+    )
 
     # ------------------------------------------------------------------ #
-    # 2. Gram matrices (one per block)                                     #
+    # 2. Gram matrices (one per block)                                   #
     # ------------------------------------------------------------------ #
     m = len(dist_list)   # total number of blocks = k + 2
     n = dist_list[0].shape[0]
@@ -940,7 +1038,7 @@ def related_metric_scaling_dist_matrix(
         gram_matrix_sqrt_list.append(gram_matrix_sqrt)
 
     # ------------------------------------------------------------------ #
-    # 3. RelMS combination:  G* = Σ Gj  -  (1/m) Σ_{i≠j} Gi^½ Gj^½     #
+    # 3. RelMS combination:  G* = Σ Gj  -  (1/m) Σ_{i≠j} Gi^½ Gj^½       #
     # ------------------------------------------------------------------ #
     gram_matrices_sum = sum(gram_matrix_list)
 
@@ -954,7 +1052,7 @@ def related_metric_scaling_dist_matrix(
     gram_matrix_final = gram_matrices_sum - (1 / m) * cross_product_sum
 
     # ------------------------------------------------------------------ #
-    # 4. Recover distances from G*                                         #
+    # 4. Recover distances from G*                                       #
     # ------------------------------------------------------------------ #
     g      = np.diag(gram_matrix_final).reshape(-1, 1)
     g_T    = g.T
@@ -986,58 +1084,20 @@ def related_metric_scaling_dist_matrix_faster(
     """
 
     # ------------------------------------------------------------------ #
-    # 1. Parse blocks and build per-block distance matrices                #
+    # 1. Build per-block distance matrices                               #
     # ------------------------------------------------------------------ #
-    quant_blocks, X_bin, X_multi = _get_quantitative_blocks(X, p1, p2, p3)
-    k = len(quant_blocks)
-    d1_list = _normalize_d1_per_block(d1, k)
 
-    dist_list = []
-
-    for X_q, d1_i in zip(quant_blocks, d1_list):
-        n_q = X_q.shape[1]
-        if n_q == 0:
-            dist_list.append(np.zeros((X_q.shape[0], X_q.shape[0])))
-            continue
-        d, _, _ = compute_dist_matrices(
-            X=X_q, p1=n_q, p2=0, p3=0,
-            d1=d1_i, d2=d2, d3=d3,
-            q=q, robust_method=robust_method, epsilon=epsilon,
-            alpha=alpha, n_iters=n_iters, weights=weights
-        )
-        dist_list.append(d)
-
-    n_obs = (X_bin if X_bin is not None else (X_multi if X_multi is not None else quant_blocks[0])).shape[0]
-
-    if p2 > 0 and X_bin is not None:
-        _, d_bin, _ = compute_dist_matrices(
-            X=X_bin,
-            p1=0, p2=p2, p3=0,
-            d1=d1_list[0], d2=d2, d3=d3,
-            q=q, robust_method=robust_method, epsilon=epsilon,
-            alpha=alpha, n_iters=n_iters, weights=weights
-        )
-        dist_list.append(d_bin)
-    else:
-        dist_list.append(np.zeros((n_obs, n_obs)))
-
-    if p3 > 0 and X_multi is not None:
-        _, _, d_multi = compute_dist_matrices(
-            X=X_multi,
-            p1=0, p2=0, p3=p3,
-            d1=d1_list[0], d2=d2, d3=d3,
-            q=q, robust_method=robust_method, epsilon=epsilon,
-            alpha=alpha, n_iters=n_iters, weights=weights
-        )
-        dist_list.append(d_multi)
-    else:
-        dist_list.append(np.zeros((n_obs, n_obs)))
+    dist_list = compute_dist_matrices_by_block(
+        X=X, p1=p1, p2=p2, p3=p3, d1=d1, d2=d2, d3=d3,
+        q=q, robust_method=robust_method, epsilon=epsilon,
+        alpha=alpha, n_iters=n_iters, weights=weights
+    )
 
     # ------------------------------------------------------------------ #
-    # 2. Gram matrices                                                     #
+    # 2. Gram matrices                                                   #
     # ------------------------------------------------------------------ #
     m = len(dist_list)
-    n = n_obs
+    n = dist_list[0].shape[0]
 
     gram_matrix_list      = []
     gram_matrix_sqrt_list = []
@@ -1067,7 +1127,7 @@ def related_metric_scaling_dist_matrix_faster(
         gram_matrix_sqrt_list.append(gram_matrix_sqrt)
 
     # ------------------------------------------------------------------ #
-    # 3. RelMS combination                                                 #
+    # 3. RelMS combination                                               #
     # ------------------------------------------------------------------ #
     gram_matrices_sum = sum(gram_matrix_list)
 
@@ -1080,7 +1140,7 @@ def related_metric_scaling_dist_matrix_faster(
     gram_matrix_final = gram_matrices_sum - (1 / m) * cross_product_sum
 
     # ------------------------------------------------------------------ #
-    # 4. Recover distances                                                 #
+    # 4. Recover distances                                               #
     # ------------------------------------------------------------------ #
     g_diag       = np.diag(gram_matrix_final)
     dist_2_final = g_diag[:, None] + g_diag[None, :] - 2 * gram_matrix_final

@@ -1,9 +1,9 @@
 Metadata-Version: 2.4
 Name: robust-mixed-dist
-Version: 0.1.27
+Version: 0.1.31
 Summary: Compute statistical robust distances for mixed data.
 Home-page: https://github.com/FabioScielzoOrtiz/robust_mixed_dist-package
-Author: Fabio Scielzo Ortiz
+Author: Fabio Scielzo-Ortiz
 Author-email: fabio.scielzoortiz@gmail.com
 Classifier: Programming Language :: Python :: 3
 Classifier: License :: OSI Approved :: MIT License
